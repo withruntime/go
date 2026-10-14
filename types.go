@@ -22,15 +22,18 @@ type SandboxInfo struct {
 	DiskMiB        int    `json:"diskMiB"`
 	CPU            string `json:"cpu"`
 	CPUFloorMillis int    `json:"cpuFloorMillis"`
-	Pausable       bool   `json:"pausable"`
-	TimeoutSeconds int    `json:"timeoutSeconds"`
+	// Deprecated: always true for a sandbox created since 5 October 2026:
+	// every sandbox can pause.
+	Pausable bool `json:"pausable"`
+	// TimeoutSeconds is its time limit; 0 is none: it runs while it works.
+	TimeoutSeconds int `json:"timeoutSeconds"`
 	// IdlePauseSeconds pauses it after this many idle seconds; 0 is never.
 	IdlePauseSeconds int `json:"idlePauseSeconds"`
 	// AutoWake: a request (exec, files, a visit to a shared port) wakes it
 	// when paused.
 	AutoWake bool `json:"autoWake"`
-	// Persistent: its lease renews itself while credit lasts, and its disk is
-	// kept after a stop.
+	// Persistent: it runs until stopped while credit lasts, never paused for
+	// idleness or a time limit, and its disk is kept after a stop.
 	Persistent bool `json:"persistent"`
 	// LastActiveAt is the last exec, file, terminal, desktop or preview
 	// request, to within a minute.
@@ -38,8 +41,14 @@ type SandboxInfo struct {
 	OnLeaseEnd   string     `json:"onLeaseEnd"`
 	CreatedAt    time.Time  `json:"createdAt"`
 	ReadyAt      *time.Time `json:"readyAt"`
-	ExpiresAt    *time.Time `json:"expiresAt"`
-	EndedAt      *time.Time `json:"endedAt"`
+	// ExpiresAt is where it is paid up to: ahead of now, moving on by itself
+	// while it runs. Not when it ends; that is EndsAt.
+	ExpiresAt *time.Time `json:"expiresAt"`
+	// EndsAt is when it stops or pauses by itself: its time limit, or where
+	// its funding ends once credit or a spending limit stops its renewal. Nil
+	// when it never will, and when it is not running.
+	EndsAt  *time.Time `json:"endsAt"`
+	EndedAt *time.Time `json:"endedAt"`
 	// StopReason says why a sandbox stopped, when it did.
 	StopReason      *string    `json:"stopReason"`
 	PausedAt        *time.Time `json:"pausedAt"`
@@ -92,14 +101,13 @@ type VolumeMount struct {
 	Mode     string `json:"mode,omitempty"`
 }
 
-// CreateOptions are a create's fields, every one optional. With none you get
-// the free trial while it lasts, the default region and a 2 vCPU / 4 GiB
+// CreateOptions are a create's fields, every one optional. With none you get the free usage while it lasts, the default region and a 2 vCPU / 4 GiB
 // machine for up to 30 minutes.
 type CreateOptions struct {
 	Name   string            `json:"name,omitempty"`
 	Labels map[string]string `json:"labels,omitempty"`
-	// Funding is "trial" or "paid". Omitted: the trial while it lasts, then
-	// prepaid credit. Explicit trial funding never falls back to paid credit.
+	// Deprecated: Funding is accepted and ignored: the free usage is used
+	// first, then prepaid credit.
 	Funding        string `json:"funding,omitempty"`
 	Region         string `json:"region,omitempty"`
 	VCPU           int    `json:"vcpu,omitempty"`
@@ -107,21 +115,28 @@ type CreateOptions struct {
 	DiskMiB        int    `json:"diskMiB,omitempty"`
 	CPU            string `json:"cpu,omitempty"`
 	CPUFloorMillis int    `json:"cpuFloorMillis,omitempty"`
-	// TimeoutSeconds is how long it may run before its lease ends. Default 1800.
-	TimeoutSeconds int   `json:"timeoutSeconds,omitempty"`
-	Pausable       *bool `json:"pausable,omitempty"`
-	// OnLeaseEnd is "pause" (the default) or "stop".
+	// TimeoutSeconds is a time limit, 60 to 86400 seconds (24 hours). Left 0, it has none:
+	// it runs while it works and pauses when idle, until you stop it or
+	// credit runs out.
+	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
+	// Deprecated: ignored since 5 October 2026: every sandbox can pause.
+	Pausable *bool `json:"pausable,omitempty"`
+	// OnLeaseEnd is what its time limit or credit running out does: "pause"
+	// (the default), "stop" or "delete" (when the time limit runs out, delete
+	// it and its files; credit or a spending limit only stops it).
 	OnLeaseEnd string `json:"onLeaseEnd,omitempty"`
 	// IdlePauseSeconds pauses it after this many seconds in which nothing
 	// happens in it: no request, no command or terminal running, no open
-	// connection, no network traffic and no CPU use (10 to 86400). Left 0, a
-	// pausable sandbox pauses after 60. To never pause it, pass
+	// connection, no network traffic and no CPU use (10 to 86400). Left 0, it
+	// pauses after 60 unless Persistent. To never pause it, pass
 	// Extra: map[string]any{"idlePauseSeconds": 0}. A request wakes it.
 	IdlePauseSeconds int `json:"idlePauseSeconds,omitempty"`
 	// AutoWake: a request to a paused sandbox wakes it. Default true.
 	AutoWake *bool `json:"autoWake,omitempty"`
-	// Persistent keeps it running while credit lasts and keeps its disk after
-	// a stop, for Restart. Paid only.
+	// Persistent keeps it running until you stop it, while credit lasts, with
+	// no idle pause unless IdlePauseSeconds asks for one. Its disk is billed
+	// as any sandbox's, and kept after a stop, for Restart, as any sandbox's
+	// is. Paid only.
 	Persistent bool `json:"persistent,omitempty"`
 	// MaxTotalCostMicros is the most it may cost over its whole life.
 	MaxTotalCostMicros int64 `json:"maxTotalCostMicros,omitempty"`
@@ -142,7 +157,7 @@ type CreateOptions struct {
 	// until the sandbox runs.
 	NoWait bool `json:"-"`
 	// WaitForCapacity replaces the client's for this create; a pointer to 0
-	// fails at once when the trial, quota or region is full.
+	// fails at once when the slots without credit, quota or region are full.
 	WaitForCapacity *time.Duration `json:"-"`
 	// Extra carries fields newer than this SDK. They are merged into the body.
 	Extra map[string]any `json:"-"`
@@ -234,7 +249,8 @@ type Me struct {
 // SandboxSettings are what Sandbox.Update changes; nil fields stay as they
 // are.
 type SandboxSettings struct {
-	Name   *string           `json:"name,omitempty"`
+	Name *string `json:"name,omitempty"`
+	// Labels replaces every label; an empty, non-nil map removes them all.
 	Labels map[string]string `json:"labels,omitempty"`
 	// AutoWake: a request to a paused sandbox wakes it.
 	AutoWake *bool `json:"autoWake,omitempty"`
@@ -248,24 +264,51 @@ type SandboxSettings struct {
 	RemoveMaxTotalCost bool   `json:"-"`
 }
 
-// Usage is the account's money and trial time. Money is integer microdollars
+// Usage is the account's money and free time. Money is integer microdollars
 // in strings, exact past 2^53: Available = Credited - Spent - Expired - Held.
 type Usage struct {
-	OrgID     string `json:"orgId"`
-	Unit      string `json:"unit"`
-	Credited  string `json:"credited"`
-	Spent     string `json:"spent"`
-	Held      string `json:"held"`
-	Expired   string `json:"expired"`
-	Available string `json:"available"`
-	TakenBack string `json:"takenBack"`
-	Trial     *struct {
-		TotalMs     int64 `json:"totalMs"`
-		UsedMs      int64 `json:"usedMs"`
-		ReservedMs  int64 `json:"reservedMs"`
-		AvailableMs int64 `json:"availableMs"`
-	} `json:"trial"`
-	Resources []map[string]any `json:"resources"`
+	OrgID     string     `json:"orgId"`
+	Unit      string     `json:"unit"`
+	Credited  string     `json:"credited"`
+	Spent     string     `json:"spent"`
+	Held      string     `json:"held"`
+	Expired   string     `json:"expired"`
+	Available string     `json:"available"`
+	TakenBack string     `json:"takenBack"`
+	Trial     *TrialTime `json:"trial"`
+	// Allowances is what the account uses free this calendar month (UTC),
+	// one row per product, drawn before credit and never charged.
+	Allowances []Allowance      `json:"allowances"`
+	Resources  []map[string]any `json:"resources"`
+}
+
+// Allowance is one product's free usage this month: Quantity in Unit
+// (GiB-hour, vCPU-hour or GB-month), what is Used, Reserved for what runs now,
+// and Left. It renews at RenewsAt, the 1st of next month, 00:00 UTC.
+type Allowance struct {
+	Pool     string  `json:"pool"`
+	Unit     string  `json:"unit"`
+	Quantity float64 `json:"quantity"`
+	Used     float64 `json:"used"`
+	Reserved float64 `json:"reserved"`
+	Left     float64 `json:"left"`
+	Month    string  `json:"month"`
+	RenewsAt string  `json:"renewsAt"`
+}
+
+// TrialTime is the machine time an account can still run without credit, in
+// milliseconds. TotalMs and UsedMs count free hours given before 5 October
+// 2026 (0 for an account given none); AvailableMs is the larger of those
+// hours left and this month's free usage, as time at 2 vCPU and 4 GiB.
+// Offer is "monthly" (the free usage only) or "hours" (free hours given
+// before 5 October 2026, kept); RenewsAt is when the free usage renews.
+type TrialTime struct {
+	TotalMs     int64  `json:"totalMs"`
+	UsedMs      int64  `json:"usedMs"`
+	ReservedMs  int64  `json:"reservedMs"`
+	AvailableMs int64  `json:"availableMs"`
+	Offer       string `json:"offer,omitempty"`
+	RenewsAt    string `json:"renewsAt,omitempty"`
 }
 
 // KeyLimits is whether a key is read-only and its agent's daily limit. Money
@@ -279,4 +322,7 @@ type KeyLimits struct {
 		RemainingMicros *string `json:"remainingMicros"`
 		Window          string  `json:"window"`
 	} `json:"daily"`
+	// Trial is the machine time the account can still run without credit, nil
+	// when it has none.
+	Trial *TrialTime `json:"trial"`
 }

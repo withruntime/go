@@ -5,12 +5,16 @@
 //	if err != nil {
 //		return err
 //	}
-//	sbx, err := client.Sandboxes.Create(ctx, nil) // free trial, 2 vCPU / 4 GiB, waits until running
+//	sbx, err := client.Sandboxes.Create(ctx, nil) // free usage, 2 vCPU / 4 GiB, waits until running
 //	if err != nil {
 //		return err
 //	}
 //	defer sbx.Stop(context.Background(), nil)
-//	result, err := sbx.Exec(ctx, "python3 -c 'print(6 * 7)'", nil)
+//	err = sbx.Files.Write(ctx, "/workspace/invoice.py", []byte("print(sum([125, 250, 375]))\n"), nil)
+//	if err != nil {
+//		return err
+//	}
+//	result, err := sbx.Exec(ctx, "python3 /workspace/invoice.py", nil)
 //
 // Every call takes a context. Writes carry an idempotency key, made for you and
 // kept across the client's own retries, so a retried create never makes two

@@ -116,3 +116,56 @@ func TestOrigins(t *testing.T) {
 		}
 	}
 }
+
+// Inside a Runtime sandbox the API is reached at http://runtime.internal,
+// which the sandbox's host forwards to the public API (ARCHITECTURE.md section
+// 10, "Runtime's API from inside a sandbox").
+func TestRuntimeInternalIsAcceptedAndOtherPlainHTTPIsNot(t *testing.T) {
+	for _, value := range []string{"http://runtime.internal", "http://runtime.internal/", "http://runtime.internal:80"} {
+		got, err := origin(value)
+		if err != nil || got != SandboxBaseURL {
+			t.Fatalf("%s: got %q, %v", value, got, err)
+		}
+	}
+	for _, value := range []string{"https://runtime.internal", "http://runtime.internal:8080",
+		"http://runtime.internal/v1", "http://user@runtime.internal", "http://api.withruntime.com",
+		"http://runtime.internal.example.com"} {
+		if _, err := origin(value); err == nil {
+			t.Fatalf("%s was accepted", value)
+		}
+	}
+}
+
+func TestInASandboxCallsForThePublicAPIGoToRuntimeInternal(t *testing.T) {
+	yes, no := func() bool { return true }, func() bool { return false }
+	if got := reachable(DefaultBaseURL, yes); got != SandboxBaseURL {
+		t.Fatalf("got %s", got)
+	}
+	if got := reachable(DefaultBaseURL, no); got != DefaultBaseURL {
+		t.Fatalf("got %s", got)
+	}
+	if got := reachable("https://api.example.com", yes); got != "https://api.example.com" {
+		t.Fatalf("got %s", got)
+	}
+	marker := filepath.Join(t.TempDir(), "environment.json")
+	saved := sandboxMarker
+	sandboxMarker = marker
+	defer func() { sandboxMarker = saved }()
+	t.Setenv("RUNTIME_API_KEY", "rt_key")
+	t.Setenv("RUNTIME_API_URL", "")
+	client, err := New()
+	if err != nil || client.baseURL != DefaultBaseURL {
+		t.Fatalf("outside a sandbox: %v, %v", client, err)
+	}
+	if err := os.WriteFile(marker, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	client, err = New()
+	if err != nil || client.baseURL != SandboxBaseURL {
+		t.Fatalf("inside a sandbox: %v, %v", client, err)
+	}
+	client, err = New(WithBaseURL("https://api.example.com"))
+	if err != nil || client.baseURL != "https://api.example.com" {
+		t.Fatalf("another origin: %v, %v", client, err)
+	}
+}

@@ -12,7 +12,7 @@ import (
 // machine-readable, Hint says what to do next, and RequestID is what to quote
 // in a report (runtime feedback, or support).
 type Error struct {
-	// Code is the API's error code, such as "not_found", "trial_busy" or
+	// Code is the API's error code, such as "not_found", "no_credit_running_limit" or
 	// "missing_api_key"; "connection_error" and "timeout" when no answer came.
 	Code    string
 	Message string
@@ -55,21 +55,35 @@ func (e *Error) Unwrap() error { return e.Err }
 
 // deliberate are 503s that are a deliberate state, not a passing one: a
 // product switched off here. Retrying cannot change them.
-var deliberate = map[string]bool{"fork_unavailable": true, "previews_unavailable": true, "unavailable": true}
+var deliberate = map[string]bool{
+	"unavailable":               true,
+	"unsupported":               true,
+	"fork_unavailable":          true,
+	"previews_unavailable":      true,
+	"network_unavailable":       true,
+	"network_rules_unavailable": true,
+	"secrets_unavailable":       true,
+	"identity_unavailable":      true,
+	"env_unavailable":           true,
+	"resize_unavailable":        true,
+}
 
-// passing are refusals that clear by themselves: a host frees room, a trial
-// slot frees.
-var passing = map[string]bool{"no_capacity": true, "trial_busy": true}
+// passing are refusals that clear by themselves: a host frees room, a
+// sandbox of an account without credit stops.
+var passing = map[string]bool{"no_capacity": true, "no_credit_running_limit": true, "no_credit_total_limit": true}
 
 // waitsForRoom are refusals of a create that clear when a sandbox stops or
 // pauses or a host frees room. Sandboxes.Create waits them out, retrying with
 // the same key and input, for up to the client's WaitForCapacity.
 var waitsForRoom = map[string]bool{
-	"trial_busy":         true,
-	"trial_domain_limit": true,
-	"trial_capacity":     true,
-	"quota_exceeded":     true,
-	"no_capacity":        true,
+	"no_credit_running_limit": true,
+	"no_credit_total_limit":   true,
+	"no_credit_domain_limit":  true,
+	"no_credit_capacity_full": true,
+	"quota_exceeded":          true,
+	"no_capacity":             true,
+	// A volume whose last sandbox is stopping: free within seconds.
+	"volume_releasing": true,
 }
 
 // Retryable reports whether retrying this exact call (with the same

@@ -11,7 +11,7 @@ import (
 )
 
 // Version is this SDK's version, sent as X-Runtime-Client.
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 // DefaultBaseURL is Runtime's API.
 const DefaultBaseURL = "https://api.withruntime.com"
@@ -55,14 +55,30 @@ type Client struct {
 	// Feedback tells the Runtime team something.
 	Feedback *FeedbackService
 	// Support asks Runtime support.
-	Support   *SupportService
-	Domains   *DomainService
-	Ports     *PortService
+	Support *SupportService
+	Domains *DomainService
+	Ports   *PortService
+	// IPs reserves dedicated outbound addresses.
+	IPs *AddressService
+	// Networks holds the account's networks: WireGuard into your sandboxes.
+	Networks *NetworkService
+	SSO      *SSOService
+	MCP      *MCPService
+
+	// Deprecated: renamed IPs on 6 October 2026 (one plural word per
+	// product); the old name is the same service until a release after its
+	// 30 days of overlap removes it.
 	Addresses *AddressService
-	// Tunnel manages the account's WireGuard network.
+	// Deprecated: renamed Networks.WireGuard on 6 October 2026; the old name
+	// is the same service until a release after its 30 days of overlap
+	// removes it.
 	Tunnel *PrivateTunnelService
-	SSO    *SSOService
-	MCP    *MCPService
+}
+
+// NetworkService is the account's networks.
+type NetworkService struct {
+	// WireGuard is a tunnel from your own network into your sandboxes.
+	WireGuard *PrivateTunnelService
 }
 
 // Option configures a Client.
@@ -81,7 +97,8 @@ func WithAPIKey(key string) Option {
 }
 
 // WithBaseURL points the client at another API origin. The default is
-// RUNTIME_API_URL, then https://api.withruntime.com.
+// RUNTIME_API_URL, then https://api.withruntime.com. Inside a Runtime sandbox,
+// calls for https://api.withruntime.com go to http://runtime.internal.
 func WithBaseURL(value string) Option {
 	return func(c *Client) error {
 		normalized, err := origin(value)
@@ -123,8 +140,8 @@ func WithMaxRetries(n int) Option {
 }
 
 // WithWaitForCapacity is how long Sandboxes.Create keeps retrying, with the
-// same key and input, when every trial slot, the account's quota or the region
-// is full (trial_busy, quota_exceeded, no_capacity and the like). Default two
+// same key and input, when every slot without credit, the account's quota or the region
+// is full (no_credit_running_limit, quota_exceeded, no_capacity and the like). Default two
 // minutes; 0 fails at once.
 func WithWaitForCapacity(d time.Duration) Option {
 	return func(c *Client) error {
@@ -194,6 +211,9 @@ func New(options ...Option) (*Client, error) {
 			c.apiKey = key
 		}
 	}
+	// The saved key above is found by the origin as given; the calls go where
+	// that origin is reachable from here.
+	c.baseURL = reachable(c.baseURL, inRuntimeSandbox)
 	c.Sandboxes = &SandboxService{c: c}
 	c.Snapshots = &SnapshotService{c: c}
 	c.Images = &ImageService{c: c, Registries: &RegistryService{c: c}}
@@ -210,8 +230,10 @@ func New(options ...Option) (*Client, error) {
 	c.Support = &SupportService{c: c}
 	c.Domains = &DomainService{c: c}
 	c.Ports = &PortService{c: c}
-	c.Addresses = &AddressService{c: c}
-	c.Tunnel = &PrivateTunnelService{c: c}
+	c.IPs = &AddressService{c: c}
+	c.Networks = &NetworkService{WireGuard: &PrivateTunnelService{c: c}}
+	c.Addresses = c.IPs
+	c.Tunnel = c.Networks.WireGuard
 	c.SSO = &SSOService{c: c}
 	c.MCP = &MCPService{c: c}
 	return c, nil
@@ -226,7 +248,7 @@ func (c *Client) Me(ctx context.Context) (*Me, error) {
 	return &me, c.do(ctx, &call{method: http.MethodGet, path: "/v1/me"}, &me)
 }
 
-// Usage is the account's credit, holds, trial time and per-resource charges.
+// Usage is the account's credit, holds, free time and per-resource charges.
 func (c *Client) Usage(ctx context.Context) (*Usage, error) {
 	var usage Usage
 	return &usage, c.do(ctx, &call{method: http.MethodGet, path: "/v1/usage"}, &usage)

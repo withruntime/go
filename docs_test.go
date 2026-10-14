@@ -10,11 +10,11 @@ import (
 	"testing"
 )
 
-// Every Go sample in the Go guide (sdks/go/GUIDE.md)
+// Every Go sample in the Go guide (packages/cloud-guide/docs/go.md)
 // compiles and passes go vet against this module, so a sample that names a
 // method, a field or an option that does not exist fails here.
 func TestTheGuidesSamplesCompile(t *testing.T) {
-	guide, err := os.ReadFile("GUIDE.md")
+	guide, err := os.ReadFile("../../packages/cloud-guide/docs/go.md")
 	if err != nil {
 		t.Skip("the guide is not beside this module")
 	}

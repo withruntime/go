@@ -112,6 +112,67 @@ func TestCreateRetriesWithTheSameKeyAndHeaders(t *testing.T) {
 	}
 }
 
+// cutBody answers 200 and ends the connection part way through the body.
+func cutBody(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+	conn, buffered, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	_, _ = buffered.WriteString("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 400\r\n\r\n{\"id\":\"sbx-1\"")
+	_ = buffered.Flush()
+	_ = conn.Close()
+}
+
+// A create the server made but whose answer was lost part way is sent again
+// with the same key, and once the retries are spent the error carries that
+// key, so the caller can retry without a second sandbox (1 October 2026 audit).
+func TestABodyLostAfterSuccessIsRetriedWithTheSameKey(t *testing.T) {
+	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+		if n == 1 {
+			cutBody(t, w)
+			return
+		}
+		writeJSON(w, 200, running)
+	})
+	sbx, err := s.client(t).Sandboxes.Create(context.Background(), &CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sbx.ID() != "sbx-1" || len(s.requests) != 2 {
+		t.Fatalf("got %v after %d attempts", sbx.ID(), len(s.requests))
+	}
+	key := s.requests[0].Header.Get("Idempotency-Key")
+	if key == "" || s.requests[1].Header.Get("Idempotency-Key") != key {
+		t.Fatal("the retry changed the idempotency key")
+	}
+
+	always := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) { cutBody(t, w) })
+	_, err = always.client(t, WithMaxRetries(2)).Sandboxes.Create(context.Background(), &CreateOptions{})
+	var failure *Error
+	if !errors.As(err, &failure) || failure.Code != "connection_error" {
+		t.Fatalf("want a connection_error, got %v", err)
+	}
+	if len(always.requests) != 3 {
+		t.Fatalf("want 3 attempts, got %d", len(always.requests))
+	}
+	if sent := always.requests[0].Header.Get("Idempotency-Key"); sent == "" || failure.IdempotencyKey != sent {
+		t.Fatalf("the error's key %q is not the one sent, %q", failure.IdempotencyKey, sent)
+	}
+	files := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+		if n == 1 {
+			cutBody(t, w)
+			return
+		}
+		_, _ = w.Write([]byte("hello"))
+	})
+	got, err := files.client(t).bytes(context.Background(), &call{method: http.MethodGet, path: "/v1/x"})
+	if err != nil || string(got) != "hello" || len(files.requests) != 2 {
+		t.Fatalf("bytes: %q, %v after %d attempts", got, err, len(files.requests))
+	}
+}
+
 func TestAnExplicitKeyIsSentOnEveryRetry(t *testing.T) {
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		if n == 1 {
@@ -165,7 +226,7 @@ func TestACreateWaitsOutAFullTrialAndCanRefuseAtOnce(t *testing.T) {
 	busy.Store(2)
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		if busy.Add(-1) >= 0 {
-			apiError(w, 409, "trial_busy", map[string]any{"retryAfterMs": 10})
+			apiError(w, 409, "no_credit_running_limit", map[string]any{"retryAfterMs": 10})
 			return
 		}
 		writeJSON(w, 200, running)
@@ -181,8 +242,8 @@ func TestACreateWaitsOutAFullTrialAndCanRefuseAtOnce(t *testing.T) {
 	zero := time.Duration(0)
 	_, err := c.Sandboxes.Create(context.Background(), &CreateOptions{WaitForCapacity: &zero})
 	var failure *Error
-	if !errors.As(err, &failure) || failure.Code != "trial_busy" || !failure.Retryable() {
-		t.Fatalf("want trial_busy at once, got %v", err)
+	if !errors.As(err, &failure) || failure.Code != "no_credit_running_limit" || !failure.Retryable() {
+		t.Fatalf("want no_credit_running_limit at once, got %v", err)
 	}
 }
 
@@ -239,6 +300,88 @@ func TestAStreamFollowsTheProcessAcrossContinues(t *testing.T) {
 	_ = json.Unmarshal(s.bodies[0], &sent)
 	if sent["stream"] != true || sent["timeoutMs"] != float64(86_400_000) {
 		t.Fatalf("stream body %s", s.bodies[0])
+	}
+}
+
+func TestAStreamThatEndsWithoutAnExitIsFollowedOrRefused(t *testing.T) {
+	// The exec stream closes after the first line: the rest is followed from
+	// where it stopped, never returned as a result without an exit.
+	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		lines := []string{`{"type":"start","processId":"p1"}`, `{"type":"stdout","data":"one\n","offset":0}`}
+		if !strings.HasSuffix(r.URL.Path, ":exec") {
+			lines = []string{`{"type":"stdout","data":"two\n","offset":4}`, `{"type":"exit","exitCode":0,"state":"exited","timedOut":false,"durationMs":5}`}
+		}
+		fmt.Fprint(w, strings.Join(lines, "\n")+"\n")
+	})
+	sbx := newSandbox(s.client(t), SandboxInfo{ID: "sbx-1"})
+	result, err := sbx.Exec(context.Background(), "run", &ExecOptions{OnStdout: func(string) {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Stdout != "one\ntwo\n" || result.ExitCode == nil || *result.ExitCode != 0 {
+		t.Fatalf("got %+v", result)
+	}
+	if got := s.requests[1].URL.Query(); got.Get("cursor") != "4" || got.Get("follow") != "true" {
+		t.Fatalf("follow query %v", got)
+	}
+	// A process whose output keeps closing with nothing new is an error.
+	quiet := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		if strings.HasSuffix(r.URL.Path, ":exec") {
+			fmt.Fprint(w, `{"type":"start","processId":"p1"}`+"\n")
+		}
+	})
+	_, err = newSandbox(quiet.client(t), SandboxInfo{ID: "sbx-1"}).Exec(context.Background(), "run", &ExecOptions{OnStdout: func(string) {}})
+	var failure *Error
+	if !errors.As(err, &failure) || failure.Code != "connection_error" || len(quiet.requests) != 5 {
+		t.Fatalf("got %v after %d requests", err, len(quiet.requests))
+	}
+	// A stream that closes before the command started names no process.
+	empty := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+	})
+	_, err = newSandbox(empty.client(t), SandboxInfo{ID: "sbx-1"}).Exec(context.Background(), "run", &ExecOptions{OnStdout: func(string) {}})
+	if !errors.As(err, &failure) || failure.Code != "connection_error" || len(empty.requests) != 1 {
+		t.Fatalf("got %v after %d requests", err, len(empty.requests))
+	}
+}
+
+func TestACallQueuedForAConnectionExpiresWithinItsDeadline(t *testing.T) {
+	// One connection and a 100 ms client deadline; every answer takes 60 ms.
+	// A second call queued behind the first has 40 ms left once admitted, so
+	// it times out instead of taking 120 ms, and the slot is free again for
+	// the next call (1 October 2026 audit).
+	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+		time.Sleep(60 * time.Millisecond)
+		writeJSON(w, 200, map[string]any{"id": "sbx-1", "state": "running"})
+	})
+	c := s.client(t, WithMaxConnections(1), WithTimeout(100*time.Millisecond), WithMaxRetries(0))
+	first := make(chan error, 1)
+	go func() {
+		_, err := c.Sandboxes.Get(context.Background(), "sbx-1")
+		first <- err
+	}()
+	for {
+		s.mu.Lock()
+		started := len(s.requests) > 0
+		s.mu.Unlock()
+		if started {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	began := time.Now()
+	_, err := c.Sandboxes.Get(context.Background(), "sbx-1")
+	var failure *Error
+	if !errors.As(err, &failure) || failure.Code != "timeout" || time.Since(began) > 115*time.Millisecond {
+		t.Fatalf("queued call: %v after %v", err, time.Since(began))
+	}
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Sandboxes.Get(context.Background(), "sbx-1"); err != nil {
+		t.Fatalf("next call: %v", err)
 	}
 }
 
@@ -425,5 +568,34 @@ func TestUnpackRefusesEntriesOutsideTheDirectory(t *testing.T) {
 	}
 	if text, _ := os.ReadFile(filepath.Join(out, "src", "deep", "a.py")); string(text) != "print(1)\n" {
 		t.Fatal("round trip lost the file")
+	}
+}
+
+func TestAReplayedCreateThatStoppedSaysItDidNotFailToStart(t *testing.T) {
+	for _, replayed := range []bool{true, false} {
+		s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, _ []byte) {
+			if r.Method == "POST" {
+				body := map[string]any{"id": "sbx-1", "kind": "sandbox", "state": "starting"}
+				if replayed {
+					body["replayed"] = true
+				}
+				writeJSON(w, 200, body)
+				return
+			}
+			writeJSON(w, 200, map[string]any{"id": "sbx-1", "kind": "sandbox", "state": "stopped"})
+		})
+		_, err := s.client(t).Sandboxes.Create(context.Background(), &CreateOptions{IdempotencyKey: "k"})
+		var apiErr *Error
+		if !errors.As(err, &apiErr) || apiErr.Code != "start_failed" {
+			t.Fatalf("replayed=%v: want start_failed, got %v", replayed, err)
+		}
+		has := strings.Contains(apiErr.Message, "earlier call with this idempotency key") &&
+			strings.Contains(apiErr.Message, "did not fail to start")
+		if has != replayed {
+			t.Fatalf("replayed=%v: message %q", replayed, apiErr.Message)
+		}
+		if !replayed && !strings.Contains(apiErr.Message, "Sandbox sbx-1 is stopped, not running.") {
+			t.Fatalf("message %q", apiErr.Message)
+		}
 	}
 }

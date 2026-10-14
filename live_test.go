@@ -14,8 +14,7 @@ Against the real API, on the free trial. Set RUNTIME_LIVE_TEST=1; the key is
 
 	RUNTIME_API_KEY or this machine's saved connection (npx withruntime login).
 	Every sandbox it starts carries a run label and is stopped at the end,
-	whatever failed. It spends trial time only: funding is "trial", which never
-	falls back to paid credit.
+	whatever failed. It spends the account's free usage first, then credit.
 */
 func TestLiveTrial(t *testing.T) {
 	if os.Getenv("RUNTIME_LIVE_TEST") != "1" {
@@ -51,7 +50,6 @@ func TestLiveTrial(t *testing.T) {
 
 	started := time.Now()
 	sbx, err := c.Sandboxes.Create(ctx, &CreateOptions{
-		Funding:        "trial",
 		Labels:         map[string]string{"run": run, "sdk": "go"},
 		TimeoutSeconds: 600,
 	})
@@ -191,7 +189,7 @@ func TestLiveTrial(t *testing.T) {
 		}
 	}
 
-	copies, err := sbx.Fork(ctx, &ForkOptions{Funding: "trial", Labels: map[string]string{"run": run, "sdk": "go"}})
+	copies, err := sbx.Fork(ctx, &ForkOptions{Labels: map[string]string{"run": run, "sdk": "go"}})
 	if err != nil {
 		t.Fatalf("fork: %v", err)
 	}

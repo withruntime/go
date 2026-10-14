@@ -44,6 +44,20 @@ type ReferralSummary struct {
 		Status       string `json:"status"`
 		CreditMicros string `json:"creditMicros"`
 	} `json:"referredBy"`
+	// PayingCompanies is the referred companies with a matched payment still
+	// standing.
+	PayingCompanies int `json:"payingCompanies"`
+	// ShareEarnedMicros is the share credit you kept, all time.
+	ShareEarnedMicros string `json:"shareEarnedMicros"`
+	// ShareBasisPoints is your share of what a referred company spends from
+	// credit it paid for: 1000 is 10%.
+	ShareBasisPoints int `json:"shareBasisPoints"`
+	// ShareMonths is how long the share runs from a company's first matched
+	// payment.
+	ShareMonths int `json:"shareMonths"`
+	// WindowDays is how long after sign-up a referred company's payments are
+	// matched.
+	WindowDays int `json:"windowDays"`
 }
 
 // ReferralService is client.Referrals.
@@ -157,6 +171,9 @@ type AuditEvent struct {
 	IP        *string        `json:"ip"`
 	RequestID *string        `json:"requestId"`
 	Via       string         `json:"via"`
+	// Sandbox is the sandbox the request came from, when code in it called
+	// the API at http://runtime.internal.
+	Sandbox *string `json:"sandbox"`
 }
 
 // AuditPage is one page of the audit log; pass Next as Before for the next.

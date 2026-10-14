@@ -41,27 +41,27 @@ func TestParityProductRequestsAndTypedAnswers(t *testing.T) {
 		{"port open", "POST", "/v1/ports", func() error { _, e := c.Ports.Open(ctx, OpenPortOptions{SandboxID: "sandbox", Port: 5432}); return e }, nil},
 		{"port list", "GET", "/v1/ports?sandboxId=sandbox", func() error { _, e := c.Ports.List(ctx, "sandbox"); return e }, nil},
 		{"port close", "DELETE", "/v1/ports/port", func() error { return c.Ports.Close(ctx, "port") }, nil},
-		{"address reserve", "POST", "/v1/addresses", func() error {
-			a, e := c.Addresses.Reserve(ctx, 4)
+		{"address reserve", "POST", "/v1/ips", func() error {
+			a, e := c.IPs.Reserve(ctx, 4)
 			if e == nil && (a.Funded || a.FundedUntil == nil || a.RateMicros != 5000000) {
 				t.Fatalf("funding lost: %+v", a)
 			}
 			return e
 		}, map[string]any{"family": float64(4)}},
-		{"address list", "GET", "/v1/addresses", func() error { _, e := c.Addresses.List(ctx); return e }, nil},
-		{"address release", "DELETE", "/v1/addresses/address", func() error { return c.Addresses.Release(ctx, "address") }, nil},
-		{"tunnel create", "POST", "/v1/tunnel", func() error { _, e := c.Tunnel.Create(ctx, "10.66.0.0/24"); return e }, nil},
-		{"tunnel get", "GET", "/v1/tunnel", func() error { _, e := c.Tunnel.Get(ctx); return e }, nil},
-		{"peer add", "POST", "/v1/tunnel/peers", func() error {
-			out, e := c.Tunnel.AddPeer(ctx, AddTunnelPeerOptions{Name: "office"})
+		{"address list", "GET", "/v1/ips", func() error { _, e := c.IPs.List(ctx); return e }, nil},
+		{"address release", "DELETE", "/v1/ips/address", func() error { return c.IPs.Release(ctx, "address") }, nil},
+		{"tunnel create", "POST", "/v1/networks/wireguard", func() error { _, e := c.Networks.WireGuard.Create(ctx, "10.66.0.0/24"); return e }, nil},
+		{"tunnel get", "GET", "/v1/networks/wireguard", func() error { _, e := c.Networks.WireGuard.Get(ctx); return e }, nil},
+		{"peer add", "POST", "/v1/networks/wireguard/peers", func() error {
+			out, e := c.Networks.WireGuard.AddPeer(ctx, AddTunnelPeerOptions{Name: "office"})
 			if e == nil && (out.Config == nil || out.ConfigReady || out.Hint == "") {
 				t.Fatal("draft private key lost")
 			}
 			return e
 		}, nil},
-		{"peer rotate", "POST", "/v1/tunnel/peers/peer:rotate", func() error { _, e := c.Tunnel.RotatePeer(ctx, "peer", ""); return e }, nil},
-		{"peer remove", "DELETE", "/v1/tunnel/peers/peer", func() error { _, e := c.Tunnel.RemovePeer(ctx, "peer"); return e }, nil},
-		{"tunnel delete", "DELETE", "/v1/tunnel", func() error { return c.Tunnel.Delete(ctx) }, nil},
+		{"peer rotate", "POST", "/v1/networks/wireguard/peers/peer:rotate", func() error { _, e := c.Networks.WireGuard.RotatePeer(ctx, "peer", ""); return e }, nil},
+		{"peer remove", "DELETE", "/v1/networks/wireguard/peers/peer", func() error { _, e := c.Networks.WireGuard.RemovePeer(ctx, "peer"); return e }, nil},
+		{"tunnel delete", "DELETE", "/v1/networks/wireguard", func() error { return c.Networks.WireGuard.Delete(ctx) }, nil},
 		{"sso", "GET", "/v1/sso", func() error { _, e := c.SSO.Get(ctx); return e }, nil},
 		{"mcp catalog", "GET", "/v1/mcp/catalog", func() error { _, e := c.MCP.Catalog(ctx); return e }, nil},
 		{"mcp start", "POST", "/v1/sandboxes/sandbox/mcp", func() error {
@@ -91,6 +91,13 @@ func TestParityProductRequestsAndTypedAnswers(t *testing.T) {
 			}
 			return e
 		}, map[string]any{"daily": false}},
+		{"resize", "POST", "/v1/volumes/volume:resize", func() error {
+			v, e := c.Volumes.Resize(ctx, "volume", ResizeVolumeOptions{SizeMiB: 2048, IdempotencyKey: "grow-1"})
+			if e == nil && v == nil {
+				t.Fatal("no volume")
+			}
+			return e
+		}, map[string]any{"sizeMiB": float64(2048)}},
 		{"backup list", "GET", "/v1/volume-backups?volumeId=volume", func() error { _, e := c.Volumes.Backups(ctx, &BackupListOptions{VolumeID: "volume"}); return e }, nil},
 		{"backup get", "GET", "/v1/volume-backups/backup", func() error { _, e := c.Volumes.GetBackup(ctx, "backup"); return e }, nil},
 		{"backup delete", "POST", "/v1/volume-backups/backup:delete", func() error { _, e := c.Volumes.DeleteBackup(ctx, "backup"); return e }, nil},
@@ -127,11 +134,11 @@ func TestParityGeneratedPeerKeysNeverAutomaticallyRetry(t *testing.T) {
 		apiError(w, 502, "upstream_failure", nil)
 	})
 	c := s.client(t, WithMaxRetries(3))
-	_, err := c.Tunnel.AddPeer(context.Background(), AddTunnelPeerOptions{Name: "office"})
+	_, err := c.Networks.WireGuard.AddPeer(context.Background(), AddTunnelPeerOptions{Name: "office"})
 	if err == nil || len(s.requests) != 1 {
 		t.Fatalf("unexpected retry: %d %v", len(s.requests), err)
 	}
-	_, err = c.Tunnel.RotatePeer(context.Background(), "peer", "")
+	_, err = c.Networks.WireGuard.RotatePeer(context.Background(), "peer", "")
 	if err == nil || len(s.requests) != 2 {
 		t.Fatalf("unexpected rotate retry: %d %v", len(s.requests), err)
 	}
@@ -256,21 +263,21 @@ func TestFixtureParityRoutes(t *testing.T) {
 		"ports.open":        func() error { _, e := c.Ports.Open(ctx, OpenPortOptions{SandboxID: fixtureID, Port: 5432}); return e },
 		"ports.list":        func() error { _, e := c.Ports.List(ctx, fixtureID); return e },
 		"ports.close":       func() error { return c.Ports.Close(ctx, id) },
-		"addresses.reserve": func() error { _, e := c.Addresses.Reserve(ctx, 4); return e },
-		"addresses.list":    func() error { _, e := c.Addresses.List(ctx); return e },
-		"addresses.release": func() error { return c.Addresses.Release(ctx, id) },
-		"tunnel.create":     func() error { _, e := c.Tunnel.Create(ctx, ""); return e },
-		"tunnel.get":        func() error { _, e := c.Tunnel.Get(ctx); return e },
-		"tunnel.delete":     func() error { return c.Tunnel.Delete(ctx) },
+		"addresses.reserve": func() error { _, e := c.IPs.Reserve(ctx, 4); return e },
+		"addresses.list":    func() error { _, e := c.IPs.List(ctx); return e },
+		"addresses.release": func() error { return c.IPs.Release(ctx, id) },
+		"tunnel.create":     func() error { _, e := c.Networks.WireGuard.Create(ctx, ""); return e },
+		"tunnel.get":        func() error { _, e := c.Networks.WireGuard.Get(ctx); return e },
+		"tunnel.delete":     func() error { return c.Networks.WireGuard.Delete(ctx) },
 		"tunnel.addPeer": func() error {
-			_, e := c.Tunnel.AddPeer(ctx, AddTunnelPeerOptions{Name: "office", PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="})
+			_, e := c.Networks.WireGuard.AddPeer(ctx, AddTunnelPeerOptions{Name: "office", PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="})
 			return e
 		},
 		"tunnel.rotatePeer": func() error {
-			_, e := c.Tunnel.RotatePeer(ctx, id, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+			_, e := c.Networks.WireGuard.RotatePeer(ctx, id, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 			return e
 		},
-		"tunnel.removePeer": func() error { _, e := c.Tunnel.RemovePeer(ctx, id); return e },
+		"tunnel.removePeer": func() error { _, e := c.Networks.WireGuard.RemovePeer(ctx, id); return e },
 		"sso.get":           func() error { _, e := c.SSO.Get(ctx); return e },
 		"mcp.catalog":       func() error { _, e := c.MCP.Catalog(ctx); return e },
 		"mcp.start": func() error {

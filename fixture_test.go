@@ -153,6 +153,54 @@ func TestFixtureFiles(t *testing.T) {
 	}
 }
 
+// A folder moves through the API's folder routes, packed and unpacked by tar
+// in the sandbox: one request under 1 MiB, parts in order above it. The
+// fixture runs no tar for an SDK that runs it through exec.
+func TestFixtureFolders(t *testing.T) {
+	c := fixture(t)
+	ctx := context.Background()
+	sbx, _ := c.Sandboxes.Get(ctx, fixtureID)
+	local := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(local, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(local, "src", "main.py"), []byte("print(1)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := sbx.Files.Upload(ctx, local, "/workspace/project"); err != nil {
+		t.Fatal(err)
+	}
+	// Bytes gzip cannot shrink, so the archive is over 1 MiB and goes in parts.
+	noise := make([]byte, 2<<20+5)
+	state := uint32(1)
+	for i := range noise {
+		state = state*1664525 + 1013904223
+		noise[i] = byte(state >> 24)
+	}
+	if err := os.WriteFile(filepath.Join(local, "src", "noise.bin"), noise, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := sbx.Files.Upload(ctx, local, "/workspace/large"); err != nil {
+		t.Fatal(err)
+	}
+	for _, remote := range []string{"/workspace/project", "/workspace/large"} {
+		back := filepath.Join(t.TempDir(), "copy")
+		if err := sbx.Files.Download(ctx, remote, back); err != nil {
+			t.Fatal(remote, err)
+		}
+		if text, err := os.ReadFile(filepath.Join(back, "src", "main.py")); err != nil || string(text) != "print(1)\n" {
+			t.Fatalf("%s: %q %v", remote, text, err)
+		}
+	}
+	back := filepath.Join(t.TempDir(), "copy")
+	if err := sbx.Files.Download(ctx, "/workspace/large", back); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(back, "src", "noise.bin")); err != nil || string(got) != string(noise) {
+		t.Fatalf("the large folder did not round trip: %v", err)
+	}
+}
+
 func TestFixtureProcessesAndStreams(t *testing.T) {
 	c := fixture(t)
 	ctx := context.Background()

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -176,7 +177,9 @@ func TestGetOrCreateUpdateAndKeepAliveSendWhatTheAPIReads(t *testing.T) {
 		for k, v := range running {
 			info[k] = v
 		}
-		info["expiresAt"] = time.Now().Add(2 * time.Minute).UTC().Format(time.RFC3339Nano)
+		// A sandbox with a time limit, as an E2B-style create makes one.
+		end := time.Now().Add(2 * time.Minute).UTC().Format(time.RFC3339Nano)
+		info["timeoutSeconds"], info["expiresAt"], info["endsAt"] = 300, end, end
 		if strings.HasSuffix(r.URL.Path, ":extend") {
 			extended.Add(1)
 		}
@@ -184,13 +187,13 @@ func TestGetOrCreateUpdateAndKeepAliveSendWhatTheAPIReads(t *testing.T) {
 	})
 	c := s.client(t)
 	ctx := context.Background()
-	sbx, err := c.Sandboxes.GetOrCreate(ctx, "ci-cache", &CreateOptions{Funding: "trial"})
+	sbx, err := c.Sandboxes.GetOrCreate(ctx, "ci-cache", &CreateOptions{Region: "us-east"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var created map[string]any
 	_ = json.Unmarshal(s.bodies[0], &created)
-	if created["name"] != "ci-cache" || created["getOrCreate"] != true || created["funding"] != "trial" {
+	if created["name"] != "ci-cache" || created["getOrCreate"] != true || created["region"] != "us-east" {
 		t.Fatalf("create body %s", s.bodies[0])
 	}
 	off := false
@@ -201,6 +204,19 @@ func TestGetOrCreateUpdateAndKeepAliveSendWhatTheAPIReads(t *testing.T) {
 	_ = json.Unmarshal(s.bodies[1], &updated)
 	if value, ok := updated["maxTotalCostMicros"]; !ok || value != nil || updated["autoWake"] != false || len(updated) != 2 {
 		t.Fatalf("update body %s", s.bodies[1])
+	}
+	// An empty map removes every label; nil leaves them alone.
+	if err := sbx.Update(ctx, SandboxSettings{Labels: map[string]string{}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if string(s.bodies[2]) != `{"labels":{}}` {
+		t.Fatalf("clearing labels sent %s", s.bodies[2])
+	}
+	if err := sbx.Update(ctx, SandboxSettings{AutoWake: &off}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if string(s.bodies[3]) != `{"autoWake":false}` {
+		t.Fatalf("leaving labels sent %s", s.bodies[3])
 	}
 	sbx.KeepAlive(ctx, &KeepAliveOptions{Every: 10 * time.Second, Margin: 10 * time.Minute})
 	deadline := time.Now().Add(5 * time.Second)
@@ -308,5 +324,99 @@ func TestASnapshotWaitsForAResumingSandboxToSettle(t *testing.T) {
 	want := "GET sbx-1,GET sbx-1?waitFor=running,POST sbx-1:pause,POST sbx-1:snapshot,POST sbx-1:wake"
 	if strings.Join(steps, ",") != want {
 		t.Fatalf("steps %v, want %s", steps, want)
+	}
+}
+
+// A sandbox with no time limit renews itself (ARCHITECTURE.md section 10, "A
+// sandbox runs while it works"): KeepAlive watches it and extends nothing,
+// whether the server says so with endsAt null or, older, with timeoutSeconds
+// 0; once a renewal is refused, endsAt names its end and KeepAlive extends.
+func TestKeepAliveLeavesASandboxWithNoTimeLimitAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		fields map[string]any
+		want   bool
+	}{
+		{"endsAt null", map[string]any{"timeoutSeconds": 0, "endsAt": nil}, false},
+		{"persistent", map[string]any{"timeoutSeconds": 1800, "persistent": true}, false},
+		{"renewal refused", map[string]any{"timeoutSeconds": 0, "endsAt": "soon"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var extended atomic.Int32
+			s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+				info := map[string]any{}
+				for k, v := range running {
+					info[k] = v
+				}
+				soon := time.Now().Add(2 * time.Minute).UTC().Format(time.RFC3339Nano)
+				info["expiresAt"] = soon
+				for k, v := range tc.fields {
+					if v == "soon" {
+						v = soon
+					}
+					info[k] = v
+				}
+				if strings.HasSuffix(r.URL.Path, ":extend") {
+					extended.Add(1)
+				}
+				writeJSON(w, 200, info)
+			})
+			c := s.client(t)
+			ctx := context.Background()
+			sbx, err := c.Sandboxes.Create(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sbx.KeepAlive(ctx, &KeepAliveOptions{Every: 10 * time.Second, Margin: 10 * time.Minute})
+			deadline := time.Now().Add(time.Second)
+			for extended.Load() == 0 && time.Now().Before(deadline) {
+				time.Sleep(20 * time.Millisecond)
+			}
+			sbx.StopKeepAlive()
+			if got := extended.Load() > 0; got != tc.want {
+				t.Fatalf("extended %d times; wanted an extend: %v", extended.Load(), tc.want)
+			}
+		})
+	}
+}
+
+// CLOUD.md section 4: the old field names are the renamed services, until a
+// release after their week of overlap removes them.
+func TestRenamedProductFieldsAreTheSameServices(t *testing.T) {
+	c, err := New(WithAPIKey("rk_renamed"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Addresses != c.IPs || c.Tunnel != c.Networks.WireGuard || c.IPs == nil || c.Networks.WireGuard == nil {
+		t.Fatal("an old field is not the renamed service")
+	}
+}
+
+func TestReferralsReadEveryFieldAndNoName(t *testing.T) {
+	s := newServer(t, func(_ int, w http.ResponseWriter, r *http.Request, body []byte) {
+		writeJSON(w, 200, map[string]any{
+			"code": "k7m2q9xd", "link": "https://withruntime.com/r/k7m2q9xd", "signedUp": 2, "paid": 1,
+			"payingCompanies": 1, "shareEarnedMicros": "50000000", "shareBasisPoints": 1000,
+			"shareMonths": 12, "windowDays": 30,
+		})
+	})
+	c := s.client(t)
+	got, err := c.Referrals.Get(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PayingCompanies != 1 || got.ShareEarnedMicros != "50000000" || got.ShareBasisPoints != 1000 ||
+		got.ShareMonths != 12 || got.WindowDays != 30 {
+		t.Fatalf("referral fields lost: %+v", got)
+	}
+	// Marc, 10 October 2026: the link's page never names the company, so the
+	// summary has no name and there is no switch to set.
+	for _, field := range []string{"ShowName", "InviteName"} {
+		if _, ok := reflect.TypeOf(ReferralSummary{}).FieldByName(field); ok {
+			t.Fatalf("ReferralSummary still has %s", field)
+		}
+	}
+	if _, ok := reflect.TypeOf(c.Referrals).MethodByName("Update"); ok {
+		t.Fatal("Referrals still has Update")
 	}
 }
