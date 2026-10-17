@@ -291,7 +291,7 @@ func TestRequestReachesANewerEndpointWithTheSameRules(t *testing.T) {
 }
 
 // Straight after a fork the sandbox is still resuming; a snapshot then waits
-// for it to run before it pauses it, or the API refuses it as not paused.
+// for it to run, then sends only the snapshot call: the server pauses and wakes it.
 func TestASnapshotWaitsForAResumingSandboxToSettle(t *testing.T) {
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		info := map[string]any{}
@@ -321,7 +321,7 @@ func TestASnapshotWaitsForAResumingSandboxToSettle(t *testing.T) {
 		}
 		steps = append(steps, step)
 	}
-	want := "GET sbx-1,GET sbx-1?waitFor=running,POST sbx-1:pause,POST sbx-1:snapshot,POST sbx-1:wake"
+	want := "GET sbx-1,GET sbx-1?waitFor=running,POST sbx-1:snapshot"
 	if strings.Join(steps, ",") != want {
 		t.Fatalf("steps %v, want %s", steps, want)
 	}
@@ -409,7 +409,7 @@ func TestReferralsReadEveryFieldAndNoName(t *testing.T) {
 		got.ShareMonths != 12 || got.WindowDays != 30 {
 		t.Fatalf("referral fields lost: %+v", got)
 	}
-	// Marc, 10 October 2026: the link's page never names the company, so the
+	// 10 October 2026: the link's page never names the company, so the
 	// summary has no name and there is no switch to set.
 	for _, field := range []string{"ShowName", "InviteName"} {
 		if _, ok := reflect.TypeOf(ReferralSummary{}).FieldByName(field); ok {
@@ -418,5 +418,29 @@ func TestReferralsReadEveryFieldAndNoName(t *testing.T) {
 	}
 	if _, ok := reflect.TypeOf(c.Referrals).MethodByName("Update"); ok {
 		t.Fatal("Referrals still has Update")
+	}
+}
+
+func TestCreateSendsSpreadFromAndReadsPlacement(t *testing.T) {
+	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+		info := map[string]any{}
+		for k, v := range running {
+			info[k] = v
+		}
+		info["placement"] = "pl_3f9a0c1b2d4e5f60"
+		writeJSON(w, 200, info)
+	})
+	c := s.client(t)
+	sbx, err := c.Sandboxes.Create(context.Background(), &CreateOptions{SpreadFrom: []string{"a", "b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent map[string]any
+	_ = json.Unmarshal(s.bodies[0], &sent)
+	if from, _ := sent["spreadFrom"].([]any); len(from) != 2 || from[0] != "a" || from[1] != "b" {
+		t.Fatalf("create body %s", s.bodies[0])
+	}
+	if sbx.Info().Placement == nil || *sbx.Info().Placement != "pl_3f9a0c1b2d4e5f60" {
+		t.Fatalf("placement %v", sbx.Info().Placement)
 	}
 }

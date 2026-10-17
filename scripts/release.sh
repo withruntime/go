@@ -1,4 +1,8 @@
 #!/bin/sh
+# The fallback (14 October 2026): the hub publishes the SDKs by itself once
+# main carries a version a registry lacks (agents/sdks.ts, through the public
+# mirror's publish workflow). Run this by hand only when that path is down.
+#
 # Releases the Go SDK from this Mac: commits the committed sdks/go tree to the
 # public repository behind withruntime.com/go, as Runtime (the runtimeteam
 # account) and signed with its key, and tags the version there. Run it from
@@ -7,8 +11,8 @@
 #   sdks/go/scripts/release.sh git@github.com:OWNER/REPO.git
 #
 # The public history is one commit per release, never this repository's own
-# commits: they carry personal authors and messages about other work (Marc,
-# 28 September 2026). The steps before the first run, and the ones after, are
+# commits: they carry personal authors and messages about other work
+# (28 September 2026). The steps before the first run, and the ones after, are
 # in sdks/go/RELEASE.md. Bump Version in client.go first; a tag that exists is
 # refused.
 set -eu

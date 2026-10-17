@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// The leader drill on vin-5, 4 October 2026: a call in flight when the
+// The controller failover drill, 4 October 2026: a call in flight when the
 // controller died waited on a silent connection until its deadline. An
 // attempt whose answer has not started by answerStart is sent again under
 // the same key.

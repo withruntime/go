@@ -247,6 +247,60 @@ func TestACreateWaitsOutAFullTrialAndCanRefuseAtOnce(t *testing.T) {
 	}
 }
 
+func TestWakeAndRestartWaitForRoomWithOneKeyAndOthersDoNot(t *testing.T) {
+	var busy atomic.Int32
+	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+		if busy.Add(-1) >= 0 {
+			apiError(w, 409, "no_capacity", map[string]any{"retryAfterMs": 10})
+			return
+		}
+		writeJSON(w, 200, running)
+	})
+	c := s.client(t, WithMaxRetries(0))
+	for _, verb := range []string{"wake", "restart"} {
+		s.requests, s.bodies = nil, nil
+		busy.Store(2)
+		sbx := newSandbox(c, SandboxInfo{ID: "sbx-1"})
+		var err error
+		if verb == "wake" {
+			err = sbx.Wake(context.Background(), 0, nil)
+		} else {
+			err = sbx.Restart(context.Background(), nil)
+		}
+		if err != nil {
+			t.Fatal(verb, err)
+		}
+		if len(s.requests) != 3 || s.requests[0].Header.Get("Idempotency-Key") == "" ||
+			s.requests[0].Header.Get("Idempotency-Key") != s.requests[2].Header.Get("Idempotency-Key") {
+			t.Fatalf("%s: want 3 attempts with one key, got %d", verb, len(s.requests))
+		}
+		busy.Store(1)
+		zero := time.Duration(0)
+		opts := &LifecycleOptions{WaitForCapacity: &zero}
+		if verb == "wake" {
+			err = sbx.Wake(context.Background(), 0, opts)
+		} else {
+			err = sbx.Restart(context.Background(), opts)
+		}
+		var failure *Error
+		if !errors.As(err, &failure) || failure.Code != "no_capacity" {
+			t.Fatalf("%s: want no_capacity at once, got %v", verb, err)
+		}
+	}
+	// stop, pause, extend never wait
+	for _, f := range []func(*Sandbox) error{
+		func(b *Sandbox) error { return b.Stop(context.Background(), nil) },
+		func(b *Sandbox) error { return b.Pause(context.Background(), nil) },
+		func(b *Sandbox) error { return b.Extend(context.Background(), time.Minute, nil) },
+	} {
+		s.requests, s.bodies = nil, nil
+		busy.Store(1)
+		if err := f(newSandbox(c, SandboxInfo{ID: "sbx-1"})); err == nil || len(s.requests) != 1 {
+			t.Fatalf("want one refused call, got %v after %d", err, len(s.requests))
+		}
+	}
+}
+
 func TestExecCheckReturnsTheOutput(t *testing.T) {
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		writeJSON(w, 200, map[string]any{"exitCode": 3, "stdout": "out\n", "stderr": "boom\n", "timedOut": false})
