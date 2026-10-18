@@ -323,6 +323,34 @@ func TestExecCheckReturnsTheOutput(t *testing.T) {
 	}
 }
 
+func TestExecAndSpawnSendTheUserOnlyWhenGiven(t *testing.T) {
+	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+		writeJSON(w, 200, map[string]any{"id": "p1", "state": "running", "exitCode": 0, "stdout": "", "stderr": "", "timedOut": false})
+	})
+	sbx := newSandbox(s.client(t), SandboxInfo{ID: "sbx-1"})
+	ctx := context.Background()
+	if _, err := sbx.Exec(ctx, "id", &ExecOptions{User: "root"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sbx.Exec(ctx, "id", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sbx.Spawn(ctx, "sleep 1", &SpawnOptions{User: "root"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sbx.Spawn(ctx, "sleep 1", nil); err != nil {
+		t.Fatal(err)
+	}
+	for i, wantRoot := range []bool{true, false, true, false} {
+		var sent map[string]any
+		_ = json.Unmarshal(s.bodies[i], &sent)
+		user, has := sent["user"]
+		if wantRoot && user != "root" || !wantRoot && has {
+			t.Fatalf("request %d body %s", i, s.bodies[i])
+		}
+	}
+}
+
 func TestAStreamFollowsTheProcessAcrossContinues(t *testing.T) {
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
