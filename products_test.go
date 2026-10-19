@@ -92,6 +92,10 @@ func TestFixtureEveryProductMethodReachesARegisteredRoute(t *testing.T) {
 			_, err := c.Secrets.Scope(ctx, "OPENAI_API_KEY", SecretScope{Labels: []map[string]string{{"role": "hub"}}})
 			return err
 		},
+		"PUT /v1/egress-secrets/{name}/rules": func() error {
+			_, err := c.Secrets.Narrow(ctx, "OPENAI_API_KEY", NarrowSecretOptions{Hosts: []string{"api.openai.com"}})
+			return err
+		},
 		"GET /v1/egress-secrets":           func() error { _, err := c.Secrets.List(ctx); return err },
 		"DELETE /v1/egress-secrets/{name}": func() error { return c.Secrets.Delete(ctx, "OPENAI_API_KEY") },
 		"GET /v1/events": func() error {
