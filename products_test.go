@@ -193,6 +193,52 @@ func TestFixtureEveryProductMethodReachesARegisteredRoute(t *testing.T) {
 		"GET /v1/sandboxes/{id}/previews":                func() error { _, err := sbx.Previews.List(ctx); return err },
 		"POST /v1/sandboxes/{id}/previews/{port}:rotate": func() error { _, err := sbx.Previews.Rotate(ctx, 3000); return err },
 		"DELETE /v1/sandboxes/{id}/previews/{port}":      func() error { return sbx.Previews.Delete(ctx, 3000) },
+		"POST /v1/apps": func() error {
+			_, err := c.Apps.Create(ctx, CreateAppOptions{Name: "go-fixture", MaxCopies: 1, VCPU: 1, MemoryMiB: 512})
+			return err
+		},
+		"GET /v1/apps": func() error { _, err := c.Apps.List(ctx, &AppListOptions{State: []string{"live"}}); return err },
+		"GET /v1/apps/{id}": func() error {
+			_, err := c.Apps.Get(ctx, imageID, &AppGetOptions{WaitFor: "live", TimeoutSeconds: 1})
+			return err
+		},
+		"POST /v1/apps/{id}:update": func() error {
+			_, err := c.Apps.Update(ctx, imageID, UpdateAppOptions{Name: &name})
+			return err
+		},
+		"POST /v1/apps/{id}/deploys": func() error {
+			_, err := c.Apps.Deploy(ctx, imageID, DeployAppOptions{Image: "web:1", Env: map[string]string{"A": "1"}})
+			return err
+		},
+		"GET /v1/apps/{id}/deploys/{deployId}": func() error { _, err := c.Apps.GetDeploy(ctx, imageID, imageID, nil); return err },
+		"POST /v1/apps/{id}/rollback":          func() error { _, err := c.Apps.Rollback(ctx, imageID, nil); return err },
+		"GET /v1/apps/{id}/versions":           func() error { _, err := c.Apps.Versions(ctx, imageID); return err },
+		"GET /v1/apps/{id}/copies":             func() error { _, err := c.Apps.Copies(ctx, imageID); return err },
+		"DELETE /v1/apps/{id}":                 func() error { _, err := c.Apps.Delete(ctx, imageID, nil); return err },
+		"POST /v1/functions": func() error {
+			_, err := c.Functions.Create(ctx, CreateAppOptions{MaxCopies: 1, VCPU: 1, MemoryMiB: 256})
+			return err
+		},
+		"GET /v1/functions": func() error { _, err := c.Functions.List(ctx, nil); return err },
+		"POST /v1/builds": func() error {
+			_, err := c.Builds.Create(ctx, CreateBuildOptions{RepositoryID: imageID, Ref: "main", Branch: "main"})
+			return err
+		},
+		"GET /v1/builds":              func() error { _, err := c.Builds.List(ctx, &BuildListOptions{State: []string{"failed"}}); return err },
+		"GET /v1/builds/{id}":         func() error { _, err := c.Builds.Get(ctx, imageID); return err },
+		"POST /v1/builds/{id}:cancel": func() error { _, err := c.Builds.Cancel(ctx, imageID); return err },
+		"GET /v1/builds/{id}/logs":    func() error { _, err := c.Builds.Logs(ctx, imageID, nil); return err },
+		"POST /v1/repositories": func() error {
+			_, err := c.Builds.Repositories.Connect(ctx, ConnectRepositoryOptions{Provider: "github", Repository: "acme/web", Deploy: "app:web", BuildEnv: map[string]string{"NODE_ENV": "production"}})
+			return err
+		},
+		"GET /v1/repositories": func() error { _, err := c.Builds.Repositories.List(ctx, nil); return err },
+		"POST /v1/repositories/{id}:update": func() error {
+			_, err := c.Builds.Repositories.Update(ctx, imageID, UpdateRepositoryOptions{Previews: &yes, Clear: []string{"buildCommand"}})
+			return err
+		},
+		"DELETE /v1/repositories/{id}":         func() error { _, err := c.Builds.Repositories.Disconnect(ctx, imageID); return err },
+		"POST /v1/repositories/github:install": func() error { _, err := c.Builds.Repositories.InstallGithub(ctx); return err },
 	}
 	for route, run := range calls {
 		reached(t, route, run())
