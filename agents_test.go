@@ -563,23 +563,85 @@ func TestAgentTemplateDefinitionMergesAUseOverAHarness(t *testing.T) {
 	}
 }
 
-func TestAgentSessionTreeCostAndHistoryAreNilUntilSent(t *testing.T) {
-	var bare AgentSessionInfo
-	if err := json.Unmarshal([]byte(`{"id":"ses-1","state":"running"}`), &bare); err != nil {
-		t.Fatal(err)
-	}
-	if bare.ParentSessionID != nil || bare.RootSessionID != nil || bare.Cost != nil || bare.TreeCost != nil || bare.HistoryBytes != nil || bare.AttachmentBytes != nil {
-		t.Fatalf("absent fields read as %+v", bare)
-	}
+func TestAgentSessionTreeCostAndStorageReadAsSent(t *testing.T) {
 	var child AgentSessionInfo
-	body := `{"id":"ses-2","state":"done","parentSessionId":"ses-1","rootSessionId":"ses-1",` +
+	body := `{"id":"ses-2","state":"done","trigger":"spawn","reason":"budget","stopWhy":"budget",` +
+		`"parentSessionId":"ses-1","rootSessionId":"ses-1","depth":1,` +
 		`"cost":{"dollars":0.25,"vcpuSeconds":120,"gibSeconds":240},"treeCost":{"dollars":0.5,"vcpuSeconds":240,"gibSeconds":480},` +
-		`"historyBytes":2048,"attachmentBytes":4096}`
+		`"historyBytes":2048,"attachmentBytes":4096,"deletedAt":null,"createdAt":"2026-10-18T10:00:00Z"}`
 	if err := json.Unmarshal([]byte(body), &child); err != nil {
 		t.Fatal(err)
 	}
-	if *child.ParentSessionID != "ses-1" || *child.RootSessionID != "ses-1" || child.Cost.Dollars != 0.25 ||
-		child.TreeCost.GiBSeconds != 480 || *child.HistoryBytes != 2048 || *child.AttachmentBytes != 4096 {
+	if child.Trigger != "spawn" || *child.Reason != "budget" || *child.StopWhy != "budget" || *child.ParentSessionID != "ses-1" ||
+		child.RootSessionID != "ses-1" || child.Depth != 1 || child.Cost.Dollars != 0.25 || child.Cost.VCPUSeconds != 120 ||
+		child.TreeCost.GiBSeconds != 480 || child.HistoryBytes != 2048 || child.AttachmentBytes != 4096 || child.DeletedAt != nil {
 		t.Fatalf("child %+v", child)
+	}
+	var top AgentSessionInfo
+	if err := json.Unmarshal([]byte(`{"id":"ses-1","rootSessionId":"ses-1","depth":0,"parentSessionId":null,"stopWhy":null}`), &top); err != nil {
+		t.Fatal(err)
+	}
+	if top.ParentSessionID != nil || top.RootSessionID != top.ID || top.Depth != 0 || top.StopWhy != nil {
+		t.Fatalf("top %+v", top)
+	}
+	// A deleted session is kept as a record: its time is parsed, its cost kept.
+	var deleted AgentSessionInfo
+	body = `{"id":"ses-3","state":"done","reason":"deleted","key":null,"result":null,"deletedAt":"2026-10-19T08:30:00Z",` +
+		`"cost":{"dollars":1.5,"vcpuSeconds":600,"gibSeconds":1200}}`
+	if err := json.Unmarshal([]byte(body), &deleted); err != nil {
+		t.Fatal(err)
+	}
+	if deleted.DeletedAt == nil || !deleted.DeletedAt.Equal(time.Date(2026, 10, 19, 8, 30, 0, 0, time.UTC)) ||
+		*deleted.Reason != "deleted" || deleted.Key != nil || deleted.Cost.Dollars != 1.5 {
+		t.Fatalf("deleted %+v", deleted)
+	}
+}
+
+func TestAgentChildrenAndTreeListsReadByParentRootAndDeleted(t *testing.T) {
+	s := newServer(t, func(_ int, w http.ResponseWriter, r *http.Request, _ []byte) {
+		row := agentSessionAnswer("done", 4)
+		row["trigger"], row["parentSessionId"], row["depth"] = "spawn", "ses-1", 1
+		if r.URL.Query().Get("cursor") == "" {
+			writeJSON(w, 200, map[string]any{"data": []any{row}, "nextCursor": "c2"})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"data": []any{row}, "nextCursor": nil})
+	})
+	c := s.client(t)
+	ctx := context.Background()
+	session := &AgentSession{c: c, info: AgentSessionInfo{ID: "ses 1"}}
+	page, err := session.Children(ctx)
+	if err != nil || !page.HasMore() || page.Data[0].Trigger != "spawn" || *page.Data[0].ParentSessionID != "ses-1" || page.Data[0].Depth != 1 {
+		t.Fatalf("children %+v %v", page, err)
+	}
+	children := 0
+	for child, err := range page.All(ctx) {
+		if err != nil || child.Trigger != "spawn" {
+			t.Fatal(child, err)
+		}
+		children++
+	}
+	tree := 0
+	for _, err := range c.Agents.Sessions.All(ctx, &AgentSessionListOptions{Root: "ses-1", Deleted: true}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		tree++
+	}
+	if _, err := c.Agents.Sessions.List(ctx, &AgentSessionListOptions{Parent: "ses-1", State: "done", Limit: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if children != 2 || tree != 2 {
+		t.Fatalf("walked %d children and %d of the tree", children, tree)
+	}
+	var paths []string
+	for _, r := range s.requests {
+		paths = append(paths, r.URL.RequestURI())
+	}
+	want := "/v1/agents/sessions?parent=ses+1 /v1/agents/sessions?cursor=c2&parent=ses+1 " +
+		"/v1/agents/sessions?deleted=true&root=ses-1 /v1/agents/sessions?cursor=c2&deleted=true&root=ses-1 " +
+		"/v1/agents/sessions?limit=5&parent=ses-1&state=done"
+	if strings.Join(paths, " ") != want {
+		t.Fatalf("requests %v", paths)
 	}
 }

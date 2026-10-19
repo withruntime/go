@@ -239,6 +239,23 @@ func TestFixtureEveryProductMethodReachesARegisteredRoute(t *testing.T) {
 		},
 		"DELETE /v1/repositories/{id}":         func() error { _, err := c.Builds.Repositories.Disconnect(ctx, imageID); return err },
 		"POST /v1/repositories/github:install": func() error { _, err := c.Builds.Repositories.InstallGithub(ctx); return err },
+		"POST /v1/containers": func() error {
+			_, err := c.Containers.Create(ctx, CreateContainerOptions{Image: "nginx:1.27", VCPU: 1, MemoryMiB: 512, Command: []string{"nginx", "-g", "daemon off;"}})
+			return err
+		},
+		"GET /v1/containers": func() error {
+			_, err := c.Containers.List(ctx, &ContainerListOptions{State: []string{"running"}})
+			return err
+		},
+		"GET /v1/containers/{id}": func() error {
+			_, err := c.Containers.Get(ctx, imageID, &ContainerGetOptions{WaitFor: "running", TimeoutSeconds: 1})
+			return err
+		},
+		"POST /v1/containers/{id}:update": func() error {
+			_, err := c.Containers.Update(ctx, imageID, UpdateContainerOptions{Name: &name})
+			return err
+		},
+		"DELETE /v1/containers/{id}": func() error { _, err := c.Containers.Delete(ctx, imageID, nil); return err },
 	}
 	for route, run := range calls {
 		reached(t, route, run())

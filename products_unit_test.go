@@ -444,3 +444,63 @@ func TestCreateSendsSpreadFromAndReadsPlacement(t *testing.T) {
 		t.Fatalf("placement %v", sbx.Info().Placement)
 	}
 }
+
+func TestCreateAndForkSendSecretsOnlyWhenGivenAndReadThem(t *testing.T) {
+	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+		var sent map[string]any
+		_ = json.Unmarshal(body, &sent)
+		info := map[string]any{}
+		for k, v := range running {
+			info[k] = v
+		}
+		info["secrets"] = sent["secrets"]
+		if strings.HasSuffix(r.URL.Path, ":fork") {
+			writeJSON(w, 200, map[string]any{"sandboxes": []any{info}})
+			return
+		}
+		writeJSON(w, 200, info)
+	})
+	c := s.client(t)
+	ctx := context.Background()
+	var none []string
+	for i, opts := range []*CreateOptions{
+		{Secrets: &[]string{"ANTHROPIC_API_KEY"}},
+		{Secrets: &[]string{}},
+		{Secrets: &none},
+		{},
+		{Snapshot: "snap-1", Secrets: &[]string{}},
+	} {
+		if _, err := c.Sandboxes.Create(ctx, opts); err != nil {
+			t.Fatal(i, err)
+		}
+	}
+	sbx, err := c.Sandboxes.GetOrCreate(ctx, "dev", &CreateOptions{Secrets: &[]string{"ANTHROPIC_API_KEY"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sbx.Fork(ctx, &ForkOptions{Secrets: &[]string{}}); err != nil {
+		t.Fatal(err)
+	}
+	copies, err := sbx.Fork(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A pointer to a nil slice still asks for none, so it is sent as [].
+	want := []string{`["ANTHROPIC_API_KEY"]`, `[]`, `[]`, ``, `[]`, `["ANTHROPIC_API_KEY"]`, `[]`, ``}
+	if len(s.bodies) != len(want) {
+		t.Fatalf("%d requests", len(s.bodies))
+	}
+	for i, body := range s.bodies {
+		var sent map[string]json.RawMessage
+		_ = json.Unmarshal(body, &sent)
+		if string(sent["secrets"]) != want[i] {
+			t.Fatalf("request %d body %s", i, body)
+		}
+	}
+	if got := sbx.Info().Secrets; got == nil || !reflect.DeepEqual(*got, []string{"ANTHROPIC_API_KEY"}) {
+		t.Fatalf("secrets %v", got)
+	}
+	if got := copies[0].Info().Secrets; got != nil {
+		t.Fatalf("a copy with every secret reads %v", *got)
+	}
+}
