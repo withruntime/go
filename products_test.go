@@ -60,7 +60,12 @@ func TestFixtureEveryProductMethodReachesARegisteredRoute(t *testing.T) {
 	yes := true
 	name := "renamed"
 	calls := map[string]func() error{
-		"GET /v1/limits":        func() error { _, err := c.Limits.Get(ctx); return err },
+		"GET /v1/limits":         func() error { _, err := c.Limits.Get(ctx); return err },
+		"GET /v1/account/emails": func() error { _, err := c.Emails.Get(ctx); return err },
+		"POST /v1/account/emails:update": func() error {
+			_, err := c.Emails.Set(ctx, "own-deletions", false)
+			return err
+		},
 		"GET /v1/referrals":     func() error { _, err := c.Referrals.Get(ctx); return err },
 		"GET /v1/usage/compare": func() error { _, err := c.Switching.Compare(ctx, "e2b", 30); return err },
 		"GET /v1/switching":     func() error { _, err := c.Switching.Get(ctx); return err },
@@ -81,6 +86,10 @@ func TestFixtureEveryProductMethodReachesARegisteredRoute(t *testing.T) {
 		"POST /v1/volumes/{id}:delete": func() error { _, err := c.Volumes.Delete(ctx, fixtureID); return err },
 		"PUT /v1/egress-secrets/{name}": func() error {
 			_, err := c.Secrets.Set(ctx, "OPENAI_API_KEY", SetSecretOptions{Value: "sk-test", Hosts: []string{"api.openai.com"}})
+			return err
+		},
+		"PUT /v1/egress-secrets/{name}/sandboxes": func() error {
+			_, err := c.Secrets.Scope(ctx, "OPENAI_API_KEY", SecretScope{Labels: []map[string]string{{"role": "hub"}}})
 			return err
 		},
 		"GET /v1/egress-secrets":           func() error { _, err := c.Secrets.List(ctx); return err },
