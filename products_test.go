@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -14,7 +15,8 @@ import (
 /* Every product method against the REAL API router (the fixture). The fixture
    has no database behind the product routes, so most answer with an error;
    what matters is that the router matched the route and accepted the body.
-   A 404 with no error code means no such route, and a 400 or 415 means the
+   A 404 with no error code means no such route, and a 400 or 415 (or a 422
+   invalid_request) means the
    router refused what the SDK sent. The last test in fixture_test.go
    (TestFixtureZZOnlyRegisteredRoutesWereCalled) and the check below prove the
    routes were reached. */
@@ -33,7 +35,10 @@ func reached(t *testing.T, name string, err error) {
 	if failure.Status == 404 && failure.Code == "request_failed" {
 		t.Fatalf("%s: the router has no such route", name)
 	}
-	if failure.Status == 400 || failure.Status == 415 || failure.Status == 422 {
+	// A 422 other than invalid_request is the route's own answer: a program
+	// in the fixture's sandbox that failed (interpreter_failed, archive_failed
+	// ...) is 422 since 18 October 2026, and means the body was accepted.
+	if failure.Status == 400 || failure.Status == 415 || (failure.Status == 422 && failure.Code == "invalid_request") {
 		t.Fatalf("%s: the router refused the request: %v %v", name, failure, failure.Details)
 	}
 }
@@ -71,6 +76,16 @@ func TestFixtureEveryProductMethodReachesARegisteredRoute(t *testing.T) {
 		"GET /v1/switching":     func() error { _, err := c.Switching.Get(ctx); return err },
 		"POST /v1/switching":    func() error { _, err := c.Switching.Record(ctx, "e2b"); return err },
 		"GET /v1/audit":         func() error { _, err := c.Audit.List(ctx, &AuditListOptions{Action: "key.", Limit: 5}); return err },
+		"GET /v1/plans":         func() error { _, err := c.Plans.List(ctx); return err },
+		"POST /v1/plans/choose": func() error {
+			_, err := c.Plans.Choose(ctx, "pro", &PlanChooseOptions{Interval: "year"})
+			return err
+		},
+		"POST /v1/plans/cancel":         func() error { _, err := c.Plans.Cancel(ctx); return err },
+		"POST /v1/plans/resume":         func() error { _, err := c.Plans.Resume(ctx); return err },
+		"POST /v1/plans/add-ons":        func() error { _, err := c.Plans.AddOn(ctx, "extra-seats"); return err },
+		"DELETE /v1/plans/add-ons/{id}": func() error { _, err := c.Plans.RemoveAddOn(ctx, "extra-seats"); return err },
+		"PUT /v1/plans/auto-upgrade":    func() error { _, err := c.Plans.AutoUpgrade(ctx, true); return err },
 		"POST /v1/feedback": func() error {
 			_, err := c.Feedback.Submit(ctx, FeedbackOptions{Kind: "praise", Summary: "Go SDK fixture"})
 			return err
@@ -85,7 +100,17 @@ func TestFixtureEveryProductMethodReachesARegisteredRoute(t *testing.T) {
 		"GET /v1/volumes/{id}":         func() error { _, err := c.Volumes.Get(ctx, fixtureID); return err },
 		"POST /v1/volumes/{id}:delete": func() error { _, err := c.Volumes.Delete(ctx, fixtureID); return err },
 		"PUT /v1/egress-secrets/{name}": func() error {
-			_, err := c.Secrets.Set(ctx, "OPENAI_API_KEY", SetSecretOptions{Value: "sk-test", Hosts: []string{"api.openai.com"}})
+			calls, writes := 500, 0
+			_, err := c.Secrets.Set(ctx, "OPENAI_API_KEY", SetSecretOptions{
+				Value: "sk-test",
+				Hosts: []string{"api.openai.com"},
+				Git:   &SecretGit{Push: []string{"refs/heads/task/{label.task}"}},
+				API: &SecretAPIPolicy{
+					CallsPerHour:  &calls,
+					WritesPerHour: &writes,
+					GraphQL:       &SecretGraphQL{Mutations: []string{"createPullRequest"}},
+				},
+			})
 			return err
 		},
 		"PUT /v1/egress-secrets/{name}/sandboxes": func() error {
@@ -98,6 +123,18 @@ func TestFixtureEveryProductMethodReachesARegisteredRoute(t *testing.T) {
 		},
 		"GET /v1/egress-secrets":           func() error { _, err := c.Secrets.List(ctx); return err },
 		"DELETE /v1/egress-secrets/{name}": func() error { return c.Secrets.Delete(ctx, "OPENAI_API_KEY") },
+		"POST /v1/reservations": func() error {
+			start := time.Now().Add(time.Hour)
+			_, err := c.Reservations.Create(ctx, ReservationCreate{Sandboxes: 50, StartsAt: start, EndsAt: start.Add(2 * time.Hour), Vcpu: 2, Region: "us-east"})
+			return err
+		},
+		"GET /v1/reservations":         func() error { _, err := c.Reservations.List(ctx, ListReservations{Limit: 5}); return err },
+		"GET /v1/reservations/{id}":    func() error { _, err := c.Reservations.Get(ctx, fixtureID); return err },
+		"DELETE /v1/reservations/{id}": func() error { _, err := c.Reservations.Cancel(ctx, fixtureID); return err },
+		"POST /v1/reservations/{id}:update": func() error {
+			_, err := c.Reservations.Update(ctx, fixtureID, ReservationUpdate{Sandboxes: 4})
+			return err
+		},
 		"GET /v1/events": func() error {
 			_, err := c.Events.List(ctx, &EventListOptions{Type: "sandbox.stopped", Limit: 5})
 			return err
@@ -186,10 +223,21 @@ func TestFixtureEveryProductMethodReachesARegisteredRoute(t *testing.T) {
 		},
 		"POST /v1/sandboxes/{id}/files:mkdir":  func() error { return sbx.Files.Mkdir(ctx, "/workspace/dir", true) },
 		"POST /v1/sandboxes/{id}/files:rename": func() error { return sbx.Files.Rename(ctx, "/workspace/a", "/workspace/b", true) },
-		"POST /v1/sandboxes/{id}:pause":        func() error { return sbx.Pause(ctx, &LifecycleOptions{NoWait: true}) },
-		"POST /v1/sandboxes/{id}:wake":         func() error { return sbx.Wake(ctx, time.Minute, &LifecycleOptions{NoWait: true}) },
-		"POST /v1/sandboxes/{id}:restart":      func() error { return sbx.Restart(ctx, &LifecycleOptions{NoWait: true}) },
-		"POST /v1/sandboxes/{id}:stop":         func() error { return sbx.Stop(ctx, &LifecycleOptions{NoWait: true}) },
+		"POST /v1/sandboxes/{id}/files:link": func() error {
+			if _, err := sbx.Files.DownloadURL(ctx, "/workspace/a.txt", &DownloadURLOptions{Filename: "a.txt"}); err != nil {
+				return err
+			}
+			_, err := sbx.Files.UploadURL(ctx, "/workspace/b.txt", &UploadURLOptions{MaxBytes: 1024})
+			return err
+		},
+		"POST /v1/sandboxes/{id}/files:revoke-links": func() error {
+			_, err := sbx.Files.RevokeLinks(ctx)
+			return err
+		},
+		"POST /v1/sandboxes/{id}:pause":   func() error { return sbx.Pause(ctx, &LifecycleOptions{NoWait: true}) },
+		"POST /v1/sandboxes/{id}:wake":    func() error { return sbx.Wake(ctx, time.Minute, &LifecycleOptions{NoWait: true}) },
+		"POST /v1/sandboxes/{id}:restart": func() error { return sbx.Restart(ctx, &LifecycleOptions{NoWait: true}) },
+		"POST /v1/sandboxes/{id}:stop":    func() error { return sbx.Stop(ctx, &LifecycleOptions{NoWait: true}) },
 		"POST /v1/support/messages": func() error {
 			_, err := c.Support.Message(ctx, SupportMessage{Message: "Go SDK fixture"})
 			return err
@@ -218,7 +266,11 @@ func TestFixtureEveryProductMethodReachesARegisteredRoute(t *testing.T) {
 		"POST /v1/apps/{id}/rollback":          func() error { _, err := c.Apps.Rollback(ctx, imageID, nil); return err },
 		"GET /v1/apps/{id}/versions":           func() error { _, err := c.Apps.Versions(ctx, imageID); return err },
 		"GET /v1/apps/{id}/copies":             func() error { _, err := c.Apps.Copies(ctx, imageID); return err },
-		"DELETE /v1/apps/{id}":                 func() error { _, err := c.Apps.Delete(ctx, imageID, nil); return err },
+		"GET /v1/apps/{id}/logs": func() error {
+			_, err := c.Apps.Logs(ctx, imageID, &AppLogsOptions{Since: "2h", Version: 1, Stream: "stderr", Limit: 50})
+			return err
+		},
+		"DELETE /v1/apps/{id}": func() error { _, err := c.Apps.Delete(ctx, imageID, nil); return err },
 		"POST /v1/functions": func() error {
 			_, err := c.Functions.Create(ctx, CreateAppOptions{MaxCopies: 1, VCPU: 1, MemoryMiB: 256})
 			return err
@@ -243,6 +295,26 @@ func TestFixtureEveryProductMethodReachesARegisteredRoute(t *testing.T) {
 		},
 		"DELETE /v1/repositories/{id}":         func() error { _, err := c.Builds.Repositories.Disconnect(ctx, imageID); return err },
 		"POST /v1/repositories/github:install": func() error { _, err := c.Builds.Repositories.InstallGithub(ctx); return err },
+		"POST /v1/ci/repositories": func() error {
+			_, err := c.CI.Repositories.Connect(ctx, "acme/web", &ConnectCIRepositoryOptions{ProductionBranch: "main", ConfigPath: "runtime.yml", Installation: 7})
+			return err
+		},
+		"GET /v1/ci/repositories": func() error {
+			_, err := c.CI.Repositories.List(ctx, &CIRepositoryListOptions{State: []string{"connected"}})
+			return err
+		},
+		"DELETE /v1/ci/repositories/{id}": func() error { _, err := c.CI.Repositories.Disconnect(ctx, imageID); return err },
+		"GET /v1/ci/checks": func() error {
+			_, err := c.CI.Checks.List(ctx, &CICheckListOptions{RepositoryID: imageID, State: []string{"failed"}, Branch: "main", PullRequest: 3})
+			return err
+		},
+		"GET /v1/ci/checks/{id}": func() error { _, err := c.CI.Checks.Get(ctx, imageID); return err },
+		"GET /v1/ci/jobs/{id}":   func() error { _, err := c.CI.Jobs.Get(ctx, imageID); return err },
+		"GET /v1/ci/tests": func() error {
+			quarantined := true
+			_, err := c.CI.Tests.List(ctx, imageID, &CITestListOptions{Quarantined: &quarantined})
+			return err
+		},
 		"POST /v1/containers": func() error {
 			_, err := c.Containers.Create(ctx, CreateContainerOptions{Image: "nginx:1.27", VCPU: 1, MemoryMiB: 512, Command: []string{"nginx", "-g", "daemon off;"}})
 			return err
@@ -310,5 +382,90 @@ func TestFixtureAFailedCallIsTyped(t *testing.T) {
 	var failure *Error
 	if !errors.As(err, &failure) || failure.Status != 400 || failure.RequestID == "" {
 		t.Fatalf("want a typed 400 for a malformed id, got %v", err)
+	}
+}
+
+func TestSecretsSetSendsGithubAppGitAndAPIAndListReturnsThem(t *testing.T) {
+	answer := map[string]any{
+		"name": "GITHUB_APP", "hosts": []string{"api.github.com", "github.com"},
+		"placeholder": "rtsec_0123456789abcdef0123456789abcdef", "valueBytes": 32,
+		"createdAt": "2026-09-23T10:00:00.000Z", "updatedAt": "2026-09-23T10:00:00.000Z",
+		"rules": []any{map[string]any{"methods": []string{"GET"}, "paths": []string{"/repos/acme/*"}}},
+		"only":  map[string]any{"labels": []any{map[string]any{"role": "hub"}}},
+		"githubApp": map[string]any{
+			"id": 12345, "installation": 67890, "repositories": []string{"runtime-cloud"},
+			"permissions": map[string]any{"contents": "write"},
+		},
+		"git": map[string]any{"push": []string{}},
+		"api": map[string]any{"callsPerHour": 500, "writesPerHour": 0, "copies": true, "fresh": 60,
+			"graphql": map[string]any{"path": "/api/graphql", "mutations": []string{"createPullRequest"}}},
+		"enforced": true,
+	}
+	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, 200, map[string]any{"secrets": []any{answer}})
+			return
+		}
+		writeJSON(w, 200, answer)
+	})
+	c := s.client(t)
+	calls, writes, fresh := 500, 0, 60
+	saved, err := c.Secrets.Set(context.Background(), "GITHUB_APP", SetSecretOptions{
+		Value: "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----",
+		Hosts: []string{"api.github.com", "github.com"},
+		Rules: []SecretRule{{Methods: []string{"GET"}, Paths: []string{"/repos/acme/*"}}},
+		Only:  &SecretScope{Labels: []map[string]string{{"role": "hub"}}},
+		GithubApp: &SecretGithubApp{
+			ID: 12345, Installation: 67890, Repositories: []string{"runtime-cloud"},
+			Permissions: map[string]string{"contents": "write"},
+		},
+		Git: &SecretGit{},
+		API: &SecretAPIPolicy{
+			CallsPerHour: &calls, WritesPerHour: &writes, Copies: true, Fresh: &fresh,
+			GraphQL: &SecretGraphQL{Path: "/api/graphql", Mutations: []string{"createPullRequest"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(s.bodies[0], &sent); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"value": "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----",
+		"hosts": []any{"api.github.com", "github.com"},
+		"rules": []any{map[string]any{"methods": []any{"GET"}, "paths": []any{"/repos/acme/*"}}},
+		"only":  map[string]any{"labels": []any{map[string]any{"role": "hub"}}},
+		"githubApp": map[string]any{
+			"id": float64(12345), "installation": float64(67890), "repositories": []any{"runtime-cloud"},
+			"permissions": map[string]any{"contents": "write"},
+		},
+		// An empty list is sent as [], meaning no push at all, never null.
+		"git": map[string]any{"push": []any{}},
+		"api": map[string]any{"callsPerHour": float64(500), "writesPerHour": float64(0), "copies": true, "fresh": float64(60),
+			"graphql": map[string]any{"path": "/api/graphql", "mutations": []any{"createPullRequest"}}},
+	}
+	if !reflect.DeepEqual(sent, want) {
+		t.Fatalf("sent %v, want %v", sent, want)
+	}
+	if saved.GithubApp == nil || saved.GithubApp.Installation != 67890 || saved.Git == nil || len(saved.Git.Push) != 0 {
+		t.Fatalf("the answer lost its policy: %+v", saved)
+	}
+	listed, err := c.Secrets.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].API == nil || listed[0].API.WritesPerHour == nil || *listed[0].API.WritesPerHour != 0 ||
+		!listed[0].API.Copies || listed[0].API.Fresh == nil || *listed[0].API.Fresh != 60 || listed[0].API.GraphQL.Path != "/api/graphql" ||
+		listed[0].Only == nil || listed[0].Rules[0].Paths[0] != "/repos/acme/*" {
+		t.Fatalf("list lost its policy: %+v", listed)
+	}
+	// Nothing set: no policy field is sent at all.
+	if _, err := c.Secrets.Set(context.Background(), "K", SetSecretOptions{Value: "v", Hosts: []string{"a.example.com"}}); err != nil {
+		t.Fatal(err)
+	}
+	if string(s.bodies[2]) != `{"value":"v","hosts":["a.example.com"]}`+"\n" && string(s.bodies[2]) != `{"value":"v","hosts":["a.example.com"]}` {
+		t.Fatalf("a plain secret sent %s", s.bodies[2])
 	}
 }

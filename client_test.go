@@ -226,7 +226,7 @@ func TestACreateWaitsOutAFullTrialAndCanRefuseAtOnce(t *testing.T) {
 	busy.Store(2)
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		if busy.Add(-1) >= 0 {
-			apiError(w, 409, "no_credit_running_limit", map[string]any{"retryAfterMs": 10})
+			apiError(w, 429, "no_credit_running_limit", map[string]any{"retryAfterMs": 10})
 			return
 		}
 		writeJSON(w, 200, running)
@@ -247,11 +247,67 @@ func TestACreateWaitsOutAFullTrialAndCanRefuseAtOnce(t *testing.T) {
 	}
 }
 
+func TestACallWithoutARoomWaitRetriesWhatTheAnswerSays(t *testing.T) {
+	// A volume create has no room wait: the answer's own `retryable` decides,
+	// as for any call. A quota on what is kept says false and is told at
+	// once; room, or a limit on what runs at once, says true and is sent again.
+	for _, refusal := range []struct {
+		code      string
+		status    int
+		retryable bool
+	}{
+		{"quota_exceeded", 409, false}, {"no_credit_kept_limit", 409, false}, {"rate_limited", 429, false},
+		{"no_capacity", 503, true}, {"quota_exceeded", 429, true}, {"no_credit_running_limit", 429, true},
+	} {
+		s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+			if refusal.retryable && n > 1 {
+				writeJSON(w, 200, map[string]any{"id": "vol-1"})
+				return
+			}
+			apiError(w, refusal.status, refusal.code, map[string]any{"retryAfterMs": 10, "retryable": refusal.retryable})
+		})
+		var out map[string]any
+		err := s.client(t, WithMaxRetries(3)).Request(context.Background(), "POST", "/v1/volumes", &RequestOptions{Body: map[string]any{"name": "v"}}, &out)
+		var failure *Error
+		if refusal.retryable {
+			if err != nil || len(s.requests) != 2 {
+				t.Fatalf("%s %d: want it sent again once, got %v after %d calls", refusal.code, refusal.status, err, len(s.requests))
+			}
+		} else if !errors.As(err, &failure) || failure.Code != refusal.code || failure.Status != refusal.status || len(s.requests) != 1 {
+			t.Fatalf("%s %d: want one attempt and its refusal, got %v after %d calls", refusal.code, refusal.status, err, len(s.requests))
+		}
+	}
+	// A wake whose owner turned its room wait off is told at once.
+	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+		apiError(w, 503, "no_capacity", map[string]any{"retryAfterMs": 10, "retryable": true})
+	})
+	off := time.Duration(0)
+	sandbox := newSandbox(s.client(t, WithMaxRetries(3)), SandboxInfo{ID: "sbx-1"})
+	if err := sandbox.Wake(context.Background(), 0, &LifecycleOptions{WaitForCapacity: &off}); err == nil || len(s.requests) != 1 {
+		t.Fatalf("want a wake with no room wait told at once, got %v after %d calls", err, len(s.requests))
+	}
+	// A host that is only passing is still sent again.
+	s = newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+		if n == 1 {
+			apiError(w, 503, "host_unavailable", map[string]any{"retryAfterMs": 10})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"id": "vol-1"})
+	})
+	var out map[string]any
+	if err := s.client(t, WithMaxRetries(3)).Request(context.Background(), "POST", "/v1/volumes", &RequestOptions{Body: map[string]any{"name": "v"}}, &out); err != nil || len(s.requests) != 2 {
+		t.Fatalf("want host_unavailable retried once, got %v after %d calls", err, len(s.requests))
+	}
+	if (&Error{Code: "quota_exceeded", Status: 429}).Retryable() || !(&Error{Code: "no_capacity", Status: 503}).Retryable() {
+		t.Fatal("a limit is not retryable by itself, room is")
+	}
+}
+
 func TestWakeAndRestartWaitForRoomWithOneKeyAndOthersDoNot(t *testing.T) {
 	var busy atomic.Int32
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		if busy.Add(-1) >= 0 {
-			apiError(w, 409, "no_capacity", map[string]any{"retryAfterMs": 10})
+			apiError(w, 503, "no_capacity", map[string]any{"retryAfterMs": 10})
 			return
 		}
 		writeJSON(w, 200, running)
@@ -348,6 +404,72 @@ func TestExecAndSpawnSendTheUserOnlyWhenGiven(t *testing.T) {
 		if wantRoot && user != "root" || !wantRoot && has {
 			t.Fatalf("request %d body %s", i, s.bodies[i])
 		}
+	}
+}
+
+func TestExecAndSpawnSendTraceFilesOnlyWhenSet(t *testing.T) {
+	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+		if strings.HasSuffix(r.URL.Path, "/files") {
+			writeJSON(w, 200, map[string]any{"read": []string{"/etc/hostname"}, "written": []string{"/tmp/out"}, "truncated": true})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"id": "p1", "state": "running", "exitCode": 0, "stdout": "", "stderr": "", "timedOut": false,
+			"files": map[string]any{"read": []string{"/usr/lib/"}, "written": []string{}, "truncated": false}})
+	})
+	sbx := newSandbox(s.client(t), SandboxInfo{ID: "sbx-1"})
+	ctx := context.Background()
+	traced, err := sbx.Exec(ctx, "ls", &ExecOptions{TraceFiles: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if traced.Files == nil || len(traced.Files.Read) != 1 || traced.Files.Read[0] != "/usr/lib/" || traced.Files.Truncated {
+		t.Fatalf("files %+v", traced.Files)
+	}
+	if _, err := sbx.Exec(ctx, "ls", nil); err != nil {
+		t.Fatal(err)
+	}
+	process, err := sbx.Spawn(ctx, "ls", &SpawnOptions{TraceFiles: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sbx.Spawn(ctx, "ls", nil); err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []bool{true, false, true, false} {
+		var sent map[string]any
+		_ = json.Unmarshal(s.bodies[i], &sent)
+		if _, has := sent["traceFiles"]; has != want || want && sent["traceFiles"] != true {
+			t.Fatalf("request %d body %s", i, s.bodies[i])
+		}
+	}
+	files, err := process.Files(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := s.requests[len(s.requests)-1]
+	if last.Method != "GET" || last.URL.Path != "/v1/sandboxes/sbx-1/processes/p1/files" || !files.Truncated || files.Written[0] != "/tmp/out" {
+		t.Fatalf("%s %s %+v", last.Method, last.URL.Path, files)
+	}
+}
+
+func TestAStreamedExitEventCarriesTheTracedFiles(t *testing.T) {
+	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		fmt.Fprint(w, `{"type":"start","processId":"p1"}`+"\n"+
+			`{"type":"exit","exitCode":0,"state":"exited","timedOut":false,"files":{"read":["/a"],"written":["/b"],"truncated":false}}`+"\n")
+	})
+	sbx := newSandbox(s.client(t), SandboxInfo{ID: "sbx-1"})
+	result, err := sbx.Exec(context.Background(), "run", &ExecOptions{OnStdout: func(string) {}, TraceFiles: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Files == nil || result.Files.Read[0] != "/a" || result.Files.Written[0] != "/b" {
+		t.Fatalf("files %+v", result.Files)
+	}
+	var sent map[string]any
+	_ = json.Unmarshal(s.bodies[0], &sent)
+	if sent["traceFiles"] != true {
+		t.Fatalf("body %s", s.bodies[0])
 	}
 }
 
@@ -619,7 +741,7 @@ func TestExtraFieldsAreMerged(t *testing.T) {
 }
 
 func TestIdlePauseCanBeTurnedOffAtCreate(t *testing.T) {
-	// A new sandbox pauses after 60 idle seconds unless it says otherwise; an
+	// A new sandbox pauses after 300 idle seconds unless it says otherwise; an
 	// int left 0 is omitted, so "never" rides in Extra, as types.go says.
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) { writeJSON(w, 200, running) })
 	if _, err := s.client(t).Sandboxes.Create(context.Background(), &CreateOptions{Extra: map[string]any{"idlePauseSeconds": 0}}); err != nil {

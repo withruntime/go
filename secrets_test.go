@@ -47,3 +47,29 @@ func TestASecretIsScopedByOnlyAndScopeAndAnAbsentOnlyIsNotSent(t *testing.T) {
 		}
 	}
 }
+
+func TestASecretEnvIsSentWhenGivenAndReadBack(t *testing.T) {
+	secret := map[string]any{"name": "GH_REPO_A", "hosts": []string{"api.github.com"}, "placeholder": "rtsec_x", "valueBytes": 5, "env": "GITHUB_TOKEN"}
+	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) { writeJSON(w, 200, secret) })
+	c := s.client(t)
+	ctx := context.Background()
+	saved, err := c.Secrets.Set(ctx, "GH_REPO_A", SetSecretOptions{Value: "ghp_x", Hosts: []string{"api.github.com"}, Env: "GITHUB_TOKEN"})
+	if err != nil || saved.Env != "GITHUB_TOKEN" {
+		t.Fatalf("env was not read back: %v %+v", err, saved)
+	}
+	if _, err := c.Secrets.Set(ctx, "GH_REPO_A", SetSecretOptions{Value: "ghp_x", Hosts: []string{"api.github.com"}}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		`{"value":"ghp_x","hosts":["api.github.com"],"env":"GITHUB_TOKEN"}`,
+		`{"value":"ghp_x","hosts":["api.github.com"]}`,
+	}
+	if len(s.bodies) != len(want) {
+		t.Fatalf("want %d requests, got %d", len(want), len(s.bodies))
+	}
+	for i, w := range want {
+		if got := strings.TrimSpace(string(s.bodies[i])); got != w {
+			t.Errorf("request %d: got %s, want %s", i, got, w)
+		}
+	}
+}

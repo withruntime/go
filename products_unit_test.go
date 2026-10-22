@@ -327,6 +327,37 @@ func TestASnapshotWaitsForAResumingSandboxToSettle(t *testing.T) {
 	}
 }
 
+// 19 Oct 2026: a company deleted sandboxes by id while each one's KeepAlive
+// ran on, and every loop read its gone sandbox once a minute until the
+// process ended (442 404s an hour on 40 sandboxes). The first 404 ends it.
+func TestKeepAliveEndsWhenTheSandboxIsGone(t *testing.T) {
+	var reads atomic.Int32
+	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+		if n == 1 {
+			writeJSON(w, 200, running)
+			return
+		}
+		reads.Add(1)
+		writeJSON(w, 404, map[string]any{"error": "Sandbox not found.", "code": "not_found", "retryable": false})
+	})
+	c := s.client(t)
+	ctx := context.Background()
+	sbx, err := c.Sandboxes.Create(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var errs atomic.Int32
+	sbx.KeepAlive(ctx, &KeepAliveOptions{Every: 10 * time.Second, OnError: func(error) { errs.Add(1) }})
+	deadline := time.Now().Add(5 * time.Second)
+	for reads.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if reads.Load() != 1 || errs.Load() != 0 {
+		t.Fatalf("read the gone sandbox %d times, reported %d errors; want 1 read and no error", reads.Load(), errs.Load())
+	}
+}
+
 // A sandbox with no time limit renews itself (ARCHITECTURE.md section 10, "A
 // sandbox runs while it works"): KeepAlive watches it and extends nothing,
 // whether the server says so with endsAt null or, older, with timeoutSeconds
@@ -418,6 +449,104 @@ func TestReferralsReadEveryFieldAndNoName(t *testing.T) {
 	}
 	if _, ok := reflect.TypeOf(c.Referrals).MethodByName("Update"); ok {
 		t.Fatal("Referrals still has Update")
+	}
+}
+
+func TestPlansListAndEveryChange(t *testing.T) {
+	var seen []string
+	var bodies []string
+	var keys []string
+	now := map[string]any{
+		"planId": "pro", "name": "Pro", "status": "trialing", "interval": "year",
+		"periodStart": "2026-10-01T00:00:00.000Z", "periodEnd": "2026-11-01T00:00:00.000Z",
+		"trialEndsAt": "2026-10-15T00:00:00.000Z", "cancelAtPeriodEnd": true, "nextPlanId": "team",
+		"startedAt":   "2026-10-01T00:00:00.000Z",
+		"addOns":      []any{map[string]any{"id": "extra-seats", "quantity": 2, "endsAt": nil}},
+		"autoUpgrade": true,
+		"planUsage":   map[string]any{"grantedMicros": "200000000", "leftMicros": "150000000", "expiresAt": "2026-11-01T00:00:00.000Z"},
+	}
+	s := newServer(t, func(_ int, w http.ResponseWriter, r *http.Request, body []byte) {
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		bodies = append(bodies, strings.TrimSpace(string(body)))
+		keys = append(keys, r.Header.Get("Idempotency-Key"))
+		switch r.URL.Path {
+		case "/v1/plans":
+			writeJSON(w, 200, map[string]any{"current": now, "plans": []any{map[string]any{
+				"id": "pro", "name": "Pro", "card": "pro", "feeMicros": "100000000", "yearlyFeeMicros": "1000000000",
+				"bonusMicros": "10000000", "trialDays": 14, "firstPeriodDouble": true, "support": "agent",
+				"collection": "card", "contract": false, "position": 1,
+				"included": []any{map[string]any{"product": "apps", "meter": "egress", "quantity": 100.5, "unit": "GB"}},
+				"limits":   []any{map[string]any{"limit": "sandbox.count", "max": 50}, map[string]any{"limit": "sandbox.memory", "max": nil}},
+				"features": []any{"sso"},
+				"addOns": []any{map[string]any{"id": "extra-seats", "name": "Extra seats", "feeMicros": "20000000",
+					"limits": []any{map[string]any{"limit": "member.count", "add": 10}}, "feature": nil}},
+			}}})
+		case "/v1/plans/choose":
+			writeJSON(w, 200, map[string]any{"checkoutUrl": "https://checkout.example.test/c/1", "current": nil})
+		default:
+			writeJSON(w, 200, map[string]any{"checkoutUrl": nil, "current": now})
+		}
+	})
+	c := s.client(t)
+	ctx := context.Background()
+	listed, err := c.Plans.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := listed.Current
+	if cur == nil || cur.PlanID != "pro" || cur.Status != "trialing" || cur.Interval != "year" || !cur.CancelAtPeriodEnd ||
+		cur.NextPlanID == nil || *cur.NextPlanID != "team" || cur.TrialEndsAt == nil || cur.TrialEndsAt.Day() != 15 ||
+		cur.PeriodEnd == nil || cur.PeriodEnd.Year() != 2026 || !cur.AutoUpgrade ||
+		len(cur.AddOns) != 1 || cur.AddOns[0].Quantity != 2 || cur.AddOns[0].EndsAt != nil ||
+		cur.PlanUsage == nil || cur.PlanUsage.LeftMicros != "150000000" {
+		t.Fatalf("current plan lost: %+v", cur)
+	}
+	p := listed.Plans[0]
+	if len(listed.Plans) != 1 || p.FeeMicros != "100000000" || p.YearlyFeeMicros == nil || *p.YearlyFeeMicros != "1000000000" ||
+		p.Card == nil || *p.Card != "pro" || p.TrialDays != 14 || !p.FirstPeriodDouble || p.Support != "agent" || p.Position != 1 ||
+		p.Included[0].Quantity != 100.5 || p.Limits[0].Limit != "sandbox.count" || p.Limits[0].Max == nil || *p.Limits[0].Max != 50 ||
+		p.Limits[1].Max != nil || p.Features[0] != "sso" || p.AddOns[0].Limits[0].Add != 10 || p.AddOns[0].Feature != nil {
+		t.Fatalf("plans lost: %+v", listed.Plans)
+	}
+	chosen, err := c.Plans.Choose(ctx, "pro", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chosen.CheckoutURL == nil || *chosen.CheckoutURL != "https://checkout.example.test/c/1" || chosen.Current != nil {
+		t.Fatalf("choose lost: %+v", chosen)
+	}
+	if _, err := c.Plans.Choose(ctx, "pro", &PlanChooseOptions{Interval: "year"}); err != nil {
+		t.Fatal(err)
+	}
+	canceled, err := c.Plans.Cancel(ctx)
+	if err != nil || canceled.CheckoutURL != nil || canceled.Current == nil {
+		t.Fatalf("cancel: %+v %v", canceled, err)
+	}
+	if _, err := c.Plans.Resume(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Plans.AddOn(ctx, "extra-seats"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Plans.RemoveAddOn(ctx, "extra-seats"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Plans.AutoUpgrade(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"GET /v1/plans", "POST /v1/plans/choose", "POST /v1/plans/choose", "POST /v1/plans/cancel",
+		"POST /v1/plans/resume", "POST /v1/plans/add-ons", "DELETE /v1/plans/add-ons/extra-seats", "PUT /v1/plans/auto-upgrade"}
+	if !reflect.DeepEqual(seen, want) {
+		t.Fatalf("requests %v", seen)
+	}
+	wantBodies := []string{"", `{"plan":"pro"}`, `{"interval":"year","plan":"pro"}`, "{}", "{}", `{"addOn":"extra-seats"}`, "", `{"on":false}`}
+	if !reflect.DeepEqual(bodies, wantBodies) {
+		t.Fatalf("bodies %q", bodies)
+	}
+	for i, key := range keys[1:] {
+		if key == "" {
+			t.Fatalf("change %d sent no Idempotency-Key", i+1)
+		}
 	}
 }
 

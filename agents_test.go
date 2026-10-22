@@ -387,7 +387,7 @@ func TestAgentErrorsAreTyped(t *testing.T) {
 		{409, "name_taken", ErrConflict},
 		{409, "trigger_paused", ErrConflict},
 		{409, "not_installed", ErrConflict},
-		{409, "budget_reached", ErrConflict},
+		{402, "budget_reached", nil},
 		{409, "session_open", ErrConflict},
 		{429, "quota_exceeded", ErrRateLimited},
 		{400, "invalid_request", ErrInvalidRequest},
@@ -401,7 +401,7 @@ func TestAgentErrorsAreTyped(t *testing.T) {
 			c := s.client(t, WithMaxRetries(0))
 			_, err := c.Agents.Start(context.Background(), "helpdesk", "hi", nil)
 			failure, ok := asError(err)
-			if !ok || failure.Code != tc.code || failure.Status != tc.status || !errors.Is(err, tc.kind) {
+			if !ok || failure.Code != tc.code || failure.Status != tc.status || (tc.kind != nil && !errors.Is(err, tc.kind)) {
 				t.Fatalf("got %#v", err)
 			}
 			if failure.Message != "trigger paused: holiday" {
