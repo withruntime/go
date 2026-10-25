@@ -20,6 +20,7 @@ import (
 )
 
 func TestParityWatchResumeNoticesPollingAndStop(t *testing.T) {
+	t.Parallel()
 	reads := 0
 	stops := 0
 	s := newServer(t, func(_ int, w http.ResponseWriter, r *http.Request, _ []byte) {
@@ -84,6 +85,7 @@ func TestParityWatchResumeNoticesPollingAndStop(t *testing.T) {
 }
 
 func TestParityWatchStopClosesTheActiveResponse(t *testing.T) {
+	t.Parallel()
 	reading := make(chan struct{})
 	ended := make(chan struct{})
 	s := newServer(t, func(_ int, w http.ResponseWriter, r *http.Request, _ []byte) {
@@ -205,6 +207,7 @@ func tunnelServer(t *testing.T, mode string) (*Client, <-chan struct{}) {
 }
 
 func TestParityTunnelMultiplexFlowControlHalfCloseAndRefusal(t *testing.T) {
+	t.Parallel()
 	c, _ := tunnelServer(t, "echo")
 	sbx := newSandbox(c, SandboxInfo{ID: "sandbox"})
 	tunnel, err := sbx.OpenTunnel(context.Background())
@@ -255,6 +258,7 @@ func TestParityTunnelMultiplexFlowControlHalfCloseAndRefusal(t *testing.T) {
 	wg.Wait()
 }
 func TestParityTunnelCancellationClosesQuietHandshakeAndBlockedWriter(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"quiet", "no-credit"} {
 		t.Run(mode, func(t *testing.T) {
 			c, closed := tunnelServer(t, mode)
@@ -296,6 +300,7 @@ func TestParityTunnelCancellationClosesQuietHandshakeAndBlockedWriter(t *testing
 	}
 }
 func TestParityPortForwardPreservesResponseAfterClientHalfClose(t *testing.T) {
+	t.Parallel()
 	c, closed := tunnelServer(t, "echo")
 	sbx := newSandbox(c, SandboxInfo{ID: "sandbox"})
 	forward, err := sbx.PortForward(context.Background(), 8080, "")
@@ -330,6 +335,7 @@ func TestParityPortForwardPreservesResponseAfterClientHalfClose(t *testing.T) {
 	}
 }
 func TestParityTunnelPreservesStructuredRefusal(t *testing.T) {
+	t.Parallel()
 	c, _ := tunnelServer(t, "refuse")
 	_, err := newSandbox(c, SandboxInfo{ID: "sandbox"}).OpenTunnel(context.Background())
 	failure, ok := asError(err)
@@ -339,6 +345,7 @@ func TestParityTunnelPreservesStructuredRefusal(t *testing.T) {
 }
 
 func TestParityWatchCannotResumeWhileStopIsInFlight(t *testing.T) {
+	t.Parallel()
 	deleting := make(chan struct{})
 	release := make(chan struct{})
 	s := newServer(t, func(_ int, w http.ResponseWriter, r *http.Request, _ []byte) {
@@ -378,6 +385,7 @@ func TestParityWatchCannotResumeWhileStopIsInFlight(t *testing.T) {
 }
 
 func TestParitySocketCloseUnblocksAnInFlightWrite(t *testing.T) {
+	t.Parallel()
 	local, remote := net.Pipe()
 	defer remote.Close()
 	socket := &websocket{conn: local, reader: bufio.NewReader(local)}
@@ -441,6 +449,7 @@ func TestParityUnreadTunnelStreamDoesNotBlockControlOrCancellation(t *testing.T)
 }
 
 func TestParityTunnelUnreadOverflowFailsOnlyItsStream(t *testing.T) {
+	t.Parallel()
 	c, _ := tunnelServer(t, "echo")
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

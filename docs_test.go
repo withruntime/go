@@ -14,6 +14,7 @@ import (
 // compiles and passes go vet against this module, so a sample that names a
 // method, a field or an option that does not exist fails here.
 func TestTheGuidesSamplesCompile(t *testing.T) {
+	t.Parallel()
 	guide, err := os.ReadFile("../../packages/cloud-guide/docs/go.md")
 	if err != nil {
 		t.Skip("the guide is not beside this module")

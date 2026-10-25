@@ -24,6 +24,7 @@ func lateClient(t *testing.T, body string) (*Client, *tries) {
 }
 
 func TestALateFailureIsAnError(t *testing.T) {
+	t.Parallel()
 	c, _ := lateClient(t, "\n\n"+`{"error":{"code":"sandbox_lost","status":409,"message":"The sandbox's host was lost."}}`)
 	sandbox, err := c.Sandboxes.Get(context.Background(), "sbx-1")
 	var failure *Error
@@ -33,6 +34,7 @@ func TestALateFailureIsAnError(t *testing.T) {
 }
 
 func TestALateFailureWithoutAStatusIs500(t *testing.T) {
+	t.Parallel()
 	c, _ := lateClient(t, `{"error":{"code":"internal","message":"x"}}`)
 	_, err := c.Sandboxes.Get(context.Background(), "sbx-1")
 	var failure *Error
@@ -42,6 +44,7 @@ func TestALateFailureWithoutAStatusIs500(t *testing.T) {
 }
 
 func TestALateRetryableFailureIsSentAgainUnderItsKey(t *testing.T) {
+	t.Parallel()
 	rt := &tries{fail: func(n int, r *http.Request) (*http.Response, error) {
 		if n > 1 {
 			return nil, nil
@@ -59,6 +62,7 @@ func TestALateRetryableFailureIsSentAgainUnderItsKey(t *testing.T) {
 }
 
 func TestALateBodyThatIsNotJSONIsAnError(t *testing.T) {
+	t.Parallel()
 	c, _ := lateClient(t, "\n\n")
 	_, err := c.Sandboxes.Get(context.Background(), "sbx-1")
 	var failure *Error
@@ -68,6 +72,7 @@ func TestALateBodyThatIsNotJSONIsAnError(t *testing.T) {
 }
 
 func TestALateAnswerIsTheAnswer(t *testing.T) {
+	t.Parallel()
 	// An answer may carry an error of its own beside other fields.
 	c, _ := lateClient(t, "\n"+`{"id":"sbx-1","kind":"sandbox","state":"running","error":{"code":"x"}}`)
 	sandbox, err := c.Sandboxes.Get(context.Background(), "sbx-1")

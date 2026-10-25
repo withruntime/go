@@ -37,6 +37,7 @@ func fileReads(t *testing.T, bodies ...string) (*Sandbox, *tries) {
 }
 
 func TestAFileReadShortOfItsLengthIsRefused(t *testing.T) {
+	t.Parallel()
 	sandbox, rt := fileReads(t, "01234")
 	data, err := sandbox.Files.Read(context.Background(), "/a")
 	var failure *Error
@@ -49,6 +50,7 @@ func TestAFileReadShortOfItsLengthIsRefused(t *testing.T) {
 }
 
 func TestAFileReadThatDiffersFromItsDigestIsRefused(t *testing.T) {
+	t.Parallel()
 	sandbox, _ := fileReads(t, "0123456780")
 	if _, err := sandbox.Files.Read(context.Background(), "/a"); err == nil || !strings.Contains(err.Error(), "SHA-256") {
 		t.Fatalf("got %v", err)
@@ -56,6 +58,7 @@ func TestAFileReadThatDiffersFromItsDigestIsRefused(t *testing.T) {
 }
 
 func TestAShortFileReadIsReadAgain(t *testing.T) {
+	t.Parallel()
 	sandbox, _ := fileReads(t, "01234", "0123456789")
 	data, err := sandbox.Files.Read(context.Background(), "/a")
 	if err != nil || string(data) != "0123456789" {

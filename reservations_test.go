@@ -14,6 +14,7 @@ const bookedJSON = `{"id":"b1","status":"declined","reason":"room","message":"No
 	`"estimateMicros":"12500000","unusedRateMicros":"15000","unusedMaxMicros":"3000000","unusedChargedMicros":"0","inUse":0,"peakInUse":0,"releasedPercent":0,"createdAt":"2026-10-17T10:00:00.000Z","cancelledAt":null}`
 
 func TestReservationsCreateSendsTheWindowAndAKeyAndADeclineIsNotAnError(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(_ int, w http.ResponseWriter, _ *http.Request, _ []byte) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(bookedJSON))
@@ -49,6 +50,7 @@ func TestReservationsCreateSendsTheWindowAndAKeyAndADeclineIsNotAnError(t *testi
 }
 
 func TestReservationsListGetAndCancel(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(_ int, w http.ResponseWriter, r *http.Request, _ []byte) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/v1/reservations" {
@@ -81,6 +83,7 @@ func TestReservationsListGetAndCancel(t *testing.T) {
 }
 
 func TestReservationsKeepHoldsStandingRoomAndUpdateChangesIt(t *testing.T) {
+	t.Parallel()
 	standing := `{"id":"b1","status":"confirmed","standing":true,"snapshots":["s1"],"forKey":true,"endsAt":null,` +
 		`"heldUntil":null,"unusedMaxMicros":null,"unusedPerHourMicros":"75000","sandboxes":40,"inUse":36}`
 	s := newServer(t, func(_ int, w http.ResponseWriter, _ *http.Request, _ []byte) {

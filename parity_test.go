@@ -14,6 +14,7 @@ import (
 )
 
 func TestParityProductRequestsAndTypedAnswers(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	var method, path string
 	var received map[string]any
@@ -91,6 +92,16 @@ func TestParityProductRequestsAndTypedAnswers(t *testing.T) {
 			}
 			return e
 		}, map[string]any{"daily": false}},
+		{"backup schedule", "POST", "/v1/volumes/volume:backup-policy", func() error {
+			_, e := c.Volumes.SetBackupPolicy(ctx, "volume", SetBackupPolicyOptions{
+				Schedule: &BackupSchedule{EveryMinutes: 60}, Keep: &BackupKeep{Hourly: 24, Daily: 7},
+			})
+			return e
+		}, map[string]any{"schedule": map[string]any{"everyMinutes": float64(60)}, "keep": map[string]any{"hourly": float64(24), "daily": float64(7)}}},
+		{"backup no schedule", "POST", "/v1/volumes/volume:backup-policy", func() error {
+			_, e := c.Volumes.SetBackupPolicy(ctx, "volume", SetBackupPolicyOptions{NoSchedule: true, RetentionDays: 3})
+			return e
+		}, map[string]any{"schedule": nil, "retentionDays": float64(3)}},
 		{"resize", "POST", "/v1/volumes/volume:resize", func() error {
 			v, e := c.Volumes.Resize(ctx, "volume", ResizeVolumeOptions{SizeMiB: 2048, IdempotencyKey: "grow-1"})
 			if e == nil && v == nil {
@@ -130,6 +141,7 @@ func TestParityProductRequestsAndTypedAnswers(t *testing.T) {
 }
 
 func TestParityGeneratedPeerKeysNeverAutomaticallyRetry(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(_ int, w http.ResponseWriter, _ *http.Request, _ []byte) {
 		apiError(w, 502, "upstream_failure", nil)
 	})
@@ -145,6 +157,7 @@ func TestParityGeneratedPeerKeysNeverAutomaticallyRetry(t *testing.T) {
 }
 
 func TestParityFileModePhaseKeysAndReplay(t *testing.T) {
+	t.Parallel()
 	for _, legacy := range []bool{false, true} {
 		t.Run(fmt.Sprint(legacy), func(t *testing.T) {
 			var mu sync.Mutex
@@ -217,6 +230,7 @@ func TestParityFileModePhaseKeysAndReplay(t *testing.T) {
 }
 
 func TestParityMCPReadyCancelsAndModeZeroSurvives(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(_ int, w http.ResponseWriter, r *http.Request, _ []byte) {
 		if strings.HasSuffix(r.URL.Path, "/mcp") {
 			writeJSON(w, 200, map[string]any{"running": true, "servers": []any{map[string]any{"status": "installing"}}})

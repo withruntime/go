@@ -26,9 +26,46 @@ const testKey = "rtcloud_00000000-0000-4000-8000-000000000000_" + "AAAAAAAAAAAAA
 // recorded.
 type server struct {
 	*httptest.Server
+	testClock
 	mu       sync.Mutex
 	requests []*http.Request
 	bodies   [][]byte
+}
+
+// testClock is a test client's clock for its retry pauses (Client.pause):
+// each pause is added to the test's time at once, never slept, so a test of
+// retries runs as fast as the machine does (a late 502's backoffs alone slept
+// 2.9 s, 23 October 2026), and a gap between two tries, read on it (now), is
+// exactly the wait the client chose. A pause that would reach the call's
+// deadline, by the wall clock and the pauses before it, waits for that
+// deadline as a real sleep would.
+type testClock struct {
+	mu     sync.Mutex
+	waited time.Duration
+}
+
+// now is the wall clock plus every pause taken.
+func (c *testClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return time.Now().Add(c.waited)
+}
+
+func (c *testClock) pause(ctx context.Context, d time.Duration) error {
+	c.mu.Lock()
+	waited := c.waited
+	c.mu.Unlock()
+	if deadline, ok := ctx.Deadline(); ok && d >= time.Until(deadline)-waited {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.waited += d
+	c.mu.Unlock()
+	return nil
 }
 
 func newServer(t *testing.T, handle func(n int, w http.ResponseWriter, r *http.Request, body []byte)) *server {
@@ -53,6 +90,7 @@ func (s *server) client(t *testing.T, options ...Option) *Client {
 	if err != nil {
 		t.Fatal(err)
 	}
+	c.pause = s.pause
 	return c
 }
 
@@ -74,6 +112,7 @@ var running = map[string]any{"id": "sbx-1", "kind": "sandbox", "state": "running
 	"memoryMiB": 4096, "funding": "trial", "createdAt": "2026-09-23T10:00:00.000Z", "labels": map[string]string{}}
 
 func TestCreateRetriesWithTheSameKeyAndHeaders(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		switch n {
 		case 1:
@@ -129,6 +168,7 @@ func cutBody(t *testing.T, w http.ResponseWriter) {
 // with the same key, and once the retries are spent the error carries that
 // key, so the caller can retry without a second sandbox (1 October 2026 audit).
 func TestABodyLostAfterSuccessIsRetriedWithTheSameKey(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		if n == 1 {
 			cutBody(t, w)
@@ -174,6 +214,7 @@ func TestABodyLostAfterSuccessIsRetriedWithTheSameKey(t *testing.T) {
 }
 
 func TestAnExplicitKeyIsSentOnEveryRetry(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		if n == 1 {
 			apiError(w, 429, "rate_limited", map[string]any{"retryAfterMs": 5})
@@ -192,6 +233,7 @@ func TestAnExplicitKeyIsSentOnEveryRetry(t *testing.T) {
 }
 
 func TestADeliberate503FailsAtOnceAndErrorsAreTyped(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		apiError(w, 503, "fork_unavailable", map[string]any{"details": map[string]any{"why": "off"}})
 	})
@@ -212,6 +254,7 @@ func TestADeliberate503FailsAtOnceAndErrorsAreTyped(t *testing.T) {
 }
 
 func TestNotFoundIsNotRetried(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		apiError(w, 404, "not_found", nil)
 	})
@@ -222,6 +265,7 @@ func TestNotFoundIsNotRetried(t *testing.T) {
 }
 
 func TestACreateWaitsOutAFullTrialAndCanRefuseAtOnce(t *testing.T) {
+	t.Parallel()
 	var busy atomic.Int32
 	busy.Store(2)
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
@@ -248,6 +292,7 @@ func TestACreateWaitsOutAFullTrialAndCanRefuseAtOnce(t *testing.T) {
 }
 
 func TestACallWithoutARoomWaitRetriesWhatTheAnswerSays(t *testing.T) {
+	t.Parallel()
 	// A volume create has no room wait: the answer's own `retryable` decides,
 	// as for any call. A quota on what is kept says false and is told at
 	// once; room, or a limit on what runs at once, says true and is sent again.
@@ -304,6 +349,7 @@ func TestACallWithoutARoomWaitRetriesWhatTheAnswerSays(t *testing.T) {
 }
 
 func TestWakeAndRestartWaitForRoomWithOneKeyAndOthersDoNot(t *testing.T) {
+	t.Parallel()
 	var busy atomic.Int32
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		if busy.Add(-1) >= 0 {
@@ -358,6 +404,7 @@ func TestWakeAndRestartWaitForRoomWithOneKeyAndOthersDoNot(t *testing.T) {
 }
 
 func TestExecCheckReturnsTheOutput(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		writeJSON(w, 200, map[string]any{"exitCode": 3, "stdout": "out\n", "stderr": "boom\n", "timedOut": false})
 	})
@@ -380,6 +427,7 @@ func TestExecCheckReturnsTheOutput(t *testing.T) {
 }
 
 func TestExecAndSpawnSendTheUserOnlyWhenGiven(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		writeJSON(w, 200, map[string]any{"id": "p1", "state": "running", "exitCode": 0, "stdout": "", "stderr": "", "timedOut": false})
 	})
@@ -408,6 +456,7 @@ func TestExecAndSpawnSendTheUserOnlyWhenGiven(t *testing.T) {
 }
 
 func TestExecAndSpawnSendTraceFilesOnlyWhenSet(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		if strings.HasSuffix(r.URL.Path, "/files") {
 			writeJSON(w, 200, map[string]any{"read": []string{"/etc/hostname"}, "written": []string{"/tmp/out"}, "truncated": true})
@@ -453,6 +502,7 @@ func TestExecAndSpawnSendTraceFilesOnlyWhenSet(t *testing.T) {
 }
 
 func TestAStreamedExitEventCarriesTheTracedFiles(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		fmt.Fprint(w, `{"type":"start","processId":"p1"}`+"\n"+
@@ -474,6 +524,7 @@ func TestAStreamedExitEventCarriesTheTracedFiles(t *testing.T) {
 }
 
 func TestAStreamFollowsTheProcessAcrossContinues(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		lines := []string{}
@@ -508,6 +559,7 @@ func TestAStreamFollowsTheProcessAcrossContinues(t *testing.T) {
 }
 
 func TestAStreamThatEndsWithoutAnExitIsFollowedOrRefused(t *testing.T) {
+	t.Parallel()
 	// The exec stream closes after the first line: the rest is followed from
 	// where it stopped, never returned as a result without an exit.
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
@@ -590,6 +642,7 @@ func TestACallQueuedForAConnectionExpiresWithinItsDeadline(t *testing.T) {
 }
 
 func TestLargeFilesUploadInCheckedChunks(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	chunks := map[string][]byte{}
 	var begin map[string]any
@@ -629,6 +682,7 @@ func TestLargeFilesUploadInCheckedChunks(t *testing.T) {
 }
 
 func TestPagesWalkEveryItem(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		if r.URL.Query().Get("cursor") == "" {
 			writeJSON(w, 200, map[string]any{"data": []any{running}, "nextCursor": "c2"})
@@ -657,6 +711,7 @@ func TestPagesWalkEveryItem(t *testing.T) {
 }
 
 func TestARedirectIsRefusedAndACancelledCallSaysSo(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		http.Redirect(w, r, "https://elsewhere.example/", http.StatusFound)
 	})
@@ -677,6 +732,7 @@ func TestARedirectIsRefusedAndACancelledCallSaysSo(t *testing.T) {
 }
 
 func TestLifecycleCallsAndPreviews(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		if strings.Contains(r.URL.Path, "/previews") {
 			writeJSON(w, 200, map[string]any{"id": "pv", "port": 3000, "url": "https://3000-sbx-1.runtimehost.com/", "visibility": "public", "createdAt": "2026-09-23T10:00:00Z"})
@@ -729,6 +785,7 @@ func TestLifecycleCallsAndPreviews(t *testing.T) {
 }
 
 func TestExtraFieldsAreMerged(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) { writeJSON(w, 200, running) })
 	if _, err := s.client(t).Sandboxes.Create(context.Background(), &CreateOptions{VCPU: 4, Extra: map[string]any{"future": 1}}); err != nil {
 		t.Fatal(err)
@@ -741,6 +798,7 @@ func TestExtraFieldsAreMerged(t *testing.T) {
 }
 
 func TestIdlePauseCanBeTurnedOffAtCreate(t *testing.T) {
+	t.Parallel()
 	// A new sandbox pauses after 300 idle seconds unless it says otherwise; an
 	// int left 0 is omitted, so "never" rides in Extra, as types.go says.
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) { writeJSON(w, 200, running) })
@@ -755,6 +813,7 @@ func TestIdlePauseCanBeTurnedOffAtCreate(t *testing.T) {
 }
 
 func TestUnpackRefusesEntriesOutsideTheDirectory(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "src", "deep"), 0o755); err != nil {
 		t.Fatal(err)
@@ -776,6 +835,7 @@ func TestUnpackRefusesEntriesOutsideTheDirectory(t *testing.T) {
 }
 
 func TestAReplayedCreateThatStoppedSaysItDidNotFailToStart(t *testing.T) {
+	t.Parallel()
 	for _, replayed := range []bool{true, false} {
 		s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, _ []byte) {
 			if r.Method == "POST" {

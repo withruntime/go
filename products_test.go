@@ -73,10 +73,14 @@ func TestFixtureEveryProductMethodReachesARegisteredRoute(t *testing.T) {
 		},
 		"GET /v1/referrals":     func() error { _, err := c.Referrals.Get(ctx); return err },
 		"GET /v1/usage/compare": func() error { _, err := c.Switching.Compare(ctx, "e2b", 30); return err },
-		"GET /v1/switching":     func() error { _, err := c.Switching.Get(ctx); return err },
-		"POST /v1/switching":    func() error { _, err := c.Switching.Record(ctx, "e2b"); return err },
-		"GET /v1/audit":         func() error { _, err := c.Audit.List(ctx, &AuditListOptions{Action: "key.", Limit: 5}); return err },
-		"GET /v1/plans":         func() error { _, err := c.Plans.List(ctx); return err },
+		"GET /v1/usage/export": func() error {
+			_, err := c.UsageExport(ctx, UsageExportOptions{Since: "2026-09-01T00:00:00Z", Until: "2026-10-01T00:00:00Z", Limit: 5})
+			return err
+		},
+		"GET /v1/switching":  func() error { _, err := c.Switching.Get(ctx); return err },
+		"POST /v1/switching": func() error { _, err := c.Switching.Record(ctx, "e2b"); return err },
+		"GET /v1/audit":      func() error { _, err := c.Audit.List(ctx, &AuditListOptions{Action: "key.", Limit: 5}); return err },
+		"GET /v1/plans":      func() error { _, err := c.Plans.List(ctx); return err },
 		"POST /v1/plans/choose": func() error {
 			_, err := c.Plans.Choose(ctx, "pro", &PlanChooseOptions{Interval: "year"})
 			return err
@@ -377,6 +381,7 @@ func TestFixtureEveryProductMethodReachesARegisteredRoute(t *testing.T) {
 }
 
 func TestFixtureAFailedCallIsTyped(t *testing.T) {
+	t.Parallel()
 	c := fixture(t)
 	_, err := c.Volumes.Get(context.Background(), "not-a-uuid")
 	var failure *Error
@@ -386,6 +391,7 @@ func TestFixtureAFailedCallIsTyped(t *testing.T) {
 }
 
 func TestSecretsSetSendsGithubAppGitAndAPIAndListReturnsThem(t *testing.T) {
+	t.Parallel()
 	answer := map[string]any{
 		"name": "GITHUB_APP", "hosts": []string{"api.github.com", "github.com"},
 		"placeholder": "rtsec_0123456789abcdef0123456789abcdef", "valueBytes": 32,

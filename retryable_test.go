@@ -13,6 +13,7 @@ import (
 // again past maxRetries until the call's deadline.
 
 func TestAServerSaysNotRetryableOnA503AndItIsNotRetried(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		apiError(w, 503, "host_unavailable", map[string]any{"retryable": false})
 	})
@@ -27,14 +28,15 @@ func TestAServerSaysNotRetryableOnA503AndItIsNotRetried(t *testing.T) {
 func TestAServerSaysRetryableOnA409AndItIsSentAgainAfterRetryAfterUnderItsKey(t *testing.T) {
 	var first time.Time
 	var gap time.Duration
-	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+	var s *server
+	s = newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		if n == 1 {
-			first = time.Now()
+			first = s.now()
 			w.Header().Set("Retry-After", "0.2")
 			apiError(w, 409, "snapshot_not_ready", map[string]any{"retryable": true})
 			return
 		}
-		gap = time.Since(first)
+		gap = s.now().Sub(first)
 		writeJSON(w, 200, running)
 	})
 	if _, err := s.client(t).Sandboxes.Create(context.Background(), nil); err != nil {
@@ -81,6 +83,7 @@ func TestADailyCapsHourIsReturnedAtOnce(t *testing.T) {
 }
 
 func TestWithoutRetryableTheStatusRuleStandsAndNewSwitchedOffCodesFailAtOnce(t *testing.T) {
+	t.Parallel()
 	for _, code := range []string{"feature_unavailable", "delete_unavailable", "switch_image_unavailable",
 		"switching_paused", "schema_migration_required", "storage_unavailable"} {
 		s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
@@ -137,6 +140,7 @@ func TestNothingRanIsSentAgainPastMaxRetriesUntilTheDeadline(t *testing.T) {
 }
 
 func TestALateBusyIsNotSentAgainButALateGuestBusyIs(t *testing.T) {
+	t.Parallel()
 	c, rt := lateClient(t, `{"error":{"code":"busy","status":503,"message":"x","retryAfterMs":1,"retryable":false}}`)
 	if _, err := c.Sandboxes.Get(context.Background(), "sbx-1"); err == nil || len(rt.keys) != 1 {
 		t.Fatalf("want one try for a late busy, got %d", len(rt.keys))

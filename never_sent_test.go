@@ -16,8 +16,11 @@ import (
 // may have reached a server keeps the backoff (11 October 2026). Each attempt
 // goes through a RoundTripper that fails the first tries as asked, on real
 // loopback sockets, and answers ok after.
-
+//
+// The client's retry pauses are kept on the test's clock (testClock), never
+// slept, and each try is stamped by it.
 type tries struct {
+	testClock
 	mu   sync.Mutex
 	at   []time.Time
 	keys []string
@@ -26,7 +29,7 @@ type tries struct {
 
 func (t *tries) RoundTrip(r *http.Request) (*http.Response, error) {
 	t.mu.Lock()
-	t.at = append(t.at, time.Now())
+	t.at = append(t.at, t.now())
 	t.keys = append(t.keys, r.Header.Get("Idempotency-Key"))
 	n := len(t.at)
 	t.mu.Unlock()
@@ -63,10 +66,14 @@ func neverSentClient(t *testing.T, rt http.RoundTripper) *Client {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if clock, ok := rt.(*tries); ok {
+		c.pause = clock.pause
+	}
 	return c
 }
 
 func TestARefusedConnectionIsSentAgainAtOnceWithItsKey(t *testing.T) {
+	t.Parallel()
 	closed := closedAddress(t)
 	rt := &tries{fail: func(n int, r *http.Request) (*http.Response, error) {
 		if n == 1 {
@@ -88,6 +95,7 @@ func TestARefusedConnectionIsSentAgainAtOnceWithItsKey(t *testing.T) {
 }
 
 func TestASecondRefusalInARowWaitsTheBackoff(t *testing.T) {
+	t.Parallel()
 	closed := closedAddress(t)
 	rt := &tries{fail: func(n int, r *http.Request) (*http.Response, error) {
 		if n <= 2 {
@@ -104,6 +112,7 @@ func TestASecondRefusalInARowWaitsTheBackoff(t *testing.T) {
 }
 
 func TestAResetAfterTheRequestWasSentKeepsTheBackoff(t *testing.T) {
+	t.Parallel()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -142,6 +151,7 @@ func (timeoutError) Timeout() bool   { return true }
 func (timeoutError) Temporary() bool { return true }
 
 func TestATimeoutKeepsTheBackoff(t *testing.T) {
+	t.Parallel()
 	rt := &tries{fail: func(n int, r *http.Request) (*http.Response, error) {
 		if n == 1 {
 			return nil, &net.OpError{Op: "read", Net: "tcp", Err: timeoutError{}}

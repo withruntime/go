@@ -54,6 +54,7 @@ var ciTestAnswer = map[string]any{"repositoryId": ciID, "file": "a.test.ts", "ms
 	"runs": []any{map[string]any{"at": 5, "check": ciID, "job": ciID, "outcome": "flaky", "ms": nil, "writers": false}}, "updatedAt": 6}
 
 func TestCIRoutesSendWhatTheAPIReads(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	var mu sync.Mutex
 	var method, path, key string
@@ -75,6 +76,8 @@ func TestCIRoutesSendWhatTheAPIReads(t *testing.T) {
 			writeJSON(w, 200, map[string]any{"data": []any{ciCheckAnswer}, "nextCursor": nil})
 		case strings.HasPrefix(r.URL.Path, "/v1/ci/checks/"):
 			writeJSON(w, 200, ciWith(ciCheckAnswer, map[string]any{"jobs": []any{ciJobAnswer}}))
+		case r.URL.Path == "/v1/ci/releases":
+			writeJSON(w, 200, map[string]any{"data": []any{map[string]any{"id": 7, "commit": "a6049bf5a", "source": "hostd", "host": "web-4", "line": "web-4: 562211980 -> a6049bf5a", "at": 1}}, "nextCursor": nil})
 		case r.URL.Path == "/v1/ci/flakes":
 			writeJSON(w, 200, map[string]any{"data": []any{map[string]any{"id": ciID, "file": "a.test.ts", "state": "quarantined", "owner": map[string]any{"login": "octo", "pullRequest": 7}}}, "nextCursor": nil})
 		case strings.HasPrefix(r.URL.Path, "/v1/ci/flakes/"):
@@ -115,6 +118,14 @@ func TestCIRoutesSendWhatTheAPIReads(t *testing.T) {
 			}
 			return err
 		}, nil, "none"},
+		{"set undo", "POST", "/v1/ci/repositories/" + ciID + ":update", func() error {
+			_, err := c.CI.Repositories.SetUndo(ctx, ciID, true)
+			return err
+		}, map[string]any{"undoCulprits": true}, "auto"},
+		{"set undo off", "POST", "/v1/ci/repositories/" + ciID + ":update", func() error {
+			_, err := c.CI.Repositories.SetUndo(ctx, ciID, false)
+			return err
+		}, map[string]any{"undoCulprits": false}, "auto"},
 		{"disconnect", "DELETE", "/v1/ci/repositories/" + ciID, func() error {
 			_, err := c.CI.Repositories.Disconnect(ctx, ciID)
 			return err
@@ -174,6 +185,13 @@ func TestCIRoutesSendWhatTheAPIReads(t *testing.T) {
 			_, err := c.CI.Flakes.Update(ctx, ciID, CIFlakeUpdate{Owner: "acme/testers", Prove: true})
 			return err
 		}, map[string]any{"prove": true, "owner": "acme/testers"}, "auto"},
+		{"release steps list", "GET", "/v1/ci/releases?commit=a6049bf5a&repositoryId=" + ciID, func() error {
+			page, err := c.CI.Releases.List(ctx, &CIReleaseListOptions{RepositoryID: ciID, Commit: "a6049bf5a"})
+			if err == nil && (page.Data[0].ID != 7 || *page.Data[0].Host != "web-4" || page.Data[0].Source != "hostd") {
+				t.Fatalf("step %+v", page.Data[0])
+			}
+			return err
+		}, nil, "none"},
 		{"tests list filtered", "GET", "/v1/ci/tests?cursor=ZmlsZQ&limit=20&quarantined=true&repositoryId=" + ciID, func() error {
 			_, err := c.CI.Tests.List(ctx, ciID, &CITestListOptions{Quarantined: &yes, Limit: 20, Cursor: "ZmlsZQ"})
 			return err
@@ -215,6 +233,7 @@ func TestCIRoutesSendWhatTheAPIReads(t *testing.T) {
 }
 
 func TestCIListsFollowNextCursor(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(_ int, w http.ResponseWriter, r *http.Request, _ []byte) {
 		row := any(ciCheckAnswer)
 		switch r.URL.Path {
@@ -266,6 +285,7 @@ func TestCIListsFollowNextCursor(t *testing.T) {
 }
 
 func TestCIErrorsAreTyped(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		status int
 		code   string

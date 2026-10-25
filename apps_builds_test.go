@@ -13,6 +13,7 @@ import (
 )
 
 func TestAppsAndBuildsSendWhatTheAPIReads(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	var method, path, key string
 	var received map[string]any
@@ -44,6 +45,7 @@ func TestAppsAndBuildsSendWhatTheAPIReads(t *testing.T) {
 	two, three, off, on, sleep := 2, 3, false, true, 400
 	name := "web"
 	watchOff := "off"
+	staged, soak := "staged", 120
 	cases := []struct {
 		name, method, path string
 		run                func() error
@@ -72,6 +74,10 @@ func TestAppsAndBuildsSendWhatTheAPIReads(t *testing.T) {
 			_, e := c.Apps.Update(ctx, "res", UpdateAppOptions{ClearName: true, Labels: map[string]string{}, MaxCopies: &three, ReleaseWatch: &watchOff, CDN: &on})
 			return e
 		}, map[string]any{"name": nil, "labels": map[string]any{}, "maxCopies": float64(3), "releaseWatch": "off", "cdn": true}},
+		{"app staged", "POST", "/v1/apps/res:update", func() error {
+			_, e := c.Apps.Update(ctx, "res", UpdateAppOptions{ReleaseStages: &staged, ReleaseSoakSeconds: &soak})
+			return e
+		}, map[string]any{"releaseStages": "staged", "releaseSoakSeconds": float64(120)}},
 		{"app deploy", "POST", "/v1/apps/res/deploys", func() error {
 			d, e := c.Apps.Deploy(ctx, "res", DeployAppOptions{Build: "bld", Env: map[string]string{"A": "1"}, KeepEnv: true})
 			if e == nil && d.State != "building" {
@@ -172,6 +178,7 @@ func TestAppsAndBuildsSendWhatTheAPIReads(t *testing.T) {
 }
 
 func TestRefusalsTheSDKMakesSendNothing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newServer(t, func(_ int, w http.ResponseWriter, _ *http.Request, _ []byte) {
 		t.Fatal("sent a request the SDK should have refused")
@@ -192,6 +199,7 @@ func TestRefusalsTheSDKMakesSendNothing(t *testing.T) {
 }
 
 func TestABetaRefusalIsAPermissionError(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(_ int, w http.ResponseWriter, _ *http.Request, _ []byte) {
 		apiError(w, 403, "product_in_beta", nil)
 	})
@@ -206,6 +214,7 @@ func TestABetaRefusalIsAPermissionError(t *testing.T) {
 }
 
 func TestAppListsPageWithTheSameFilters(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, _ []byte) {
 		if r.URL.Query().Get("state") != "live" {
 			t.Errorf("filter lost on page %d: %s", n, r.URL.RawQuery)
@@ -232,6 +241,7 @@ func TestAppListsPageWithTheSameFilters(t *testing.T) {
 }
 
 func TestADeployWaitFollowsItsRecordUnderOneKey(t *testing.T) {
+	t.Parallel()
 	states := []string{"building", "warming", "live"}
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, _ []byte) {
 		if n == 2 {
@@ -263,6 +273,7 @@ func TestADeployWaitFollowsItsRecordUnderOneKey(t *testing.T) {
 }
 
 func TestAFailedDeployIsAnAnswerAndAFailedAppAnError(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(_ int, w http.ResponseWriter, r *http.Request, _ []byte) {
 		if strings.Contains(r.URL.Path, "deploys") {
 			writeJSON(w, 200, map[string]any{"id": "dep", "version": 1, "url": "u", "state": "failed",
@@ -284,6 +295,7 @@ func TestAFailedDeployIsAnAnswerAndAFailedAppAnError(t *testing.T) {
 }
 
 func TestADeleteWaitKeepsItsKeyThroughATimeout(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(_ int, w http.ResponseWriter, _ *http.Request, _ []byte) {
 		writeJSON(w, 200, map[string]any{"id": "app", "state": "deleting"})
 	})
@@ -307,6 +319,7 @@ func ndjson(w http.ResponseWriter, lines ...any) {
 }
 
 func TestABuildLogFollowResumesFromItsCursor(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var cursors []string
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, _ []byte) {
@@ -350,6 +363,7 @@ func TestABuildLogFollowResumesFromItsCursor(t *testing.T) {
 }
 
 func TestABuildLogFollowFailsWithWhereToResume(t *testing.T) {
+	t.Parallel()
 	cases := map[string]struct {
 		lines []any
 		code  string
@@ -389,6 +403,7 @@ func TestABuildLogFollowFailsWithWhereToResume(t *testing.T) {
 }
 
 func TestAnAppLogFollowResumesFromItsCursor(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var cursors []string
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, _ []byte) {
@@ -444,6 +459,7 @@ func TestAnAppLogFollowResumesFromItsCursor(t *testing.T) {
 }
 
 func TestAnAppLogFollowFailsWithWhereToResume(t *testing.T) {
+	t.Parallel()
 	cases := map[string]struct {
 		lines []any
 		code  string
@@ -480,6 +496,7 @@ func TestAnAppLogFollowFailsWithWhereToResume(t *testing.T) {
 }
 
 func TestAnAppLogFollowEndsWhenItsContextIs(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, _ []byte) {

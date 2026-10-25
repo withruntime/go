@@ -15,6 +15,7 @@ var memoryEntry = map[string]any{"scope": "", "path": "notes/tea.md", "bytes": 2
 var memoryUsage = map[string]any{"bytes": 42, "files": 2, "limitBytes": 1073741824, "limitFiles": 100000}
 
 func TestAgentMemoryRoutesSendTheScopeInTheQuery(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	var mu sync.Mutex
 	var seen []string

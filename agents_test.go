@@ -29,6 +29,7 @@ var triggerAnswer = map[string]any{"id": "trg-1", "agentId": "agt-1", "kind": "g
 	"pausedAt": nil, "pausedWhy": nil, "createdAt": "2026-10-18T10:00:00Z"}
 
 func TestAgentRoutesSendWhatTheAPIReads(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	var mu sync.Mutex
 	var method, path, key string
@@ -186,6 +187,7 @@ func TestAgentRoutesSendWhatTheAPIReads(t *testing.T) {
 }
 
 func TestAgentAndSessionListsFollowNextCursor(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(_ int, w http.ResponseWriter, r *http.Request, _ []byte) {
 		row := agentAnswer
 		if strings.HasPrefix(r.URL.Path, "/v1/agents/sessions") {
@@ -238,6 +240,7 @@ func agentEvent(seq int, kind, text string) map[string]any {
 // The log is read page by page, after the last event read; once a page says
 // the session ended, the rest is read without waiting until a page is empty.
 func TestAgentEventsLongPollThenDrainTheEnd(t *testing.T) {
+	t.Parallel()
 	pages := map[string]map[string]any{
 		"after=0&wait=30":  {"data": []any{agentEvent(1, "input", "hi"), agentEvent(2, "status", "reading")}, "ended": false},
 		"after=2&wait=30":  {"data": []any{}, "ended": false},
@@ -293,6 +296,7 @@ func TestAgentEventsLongPollThenDrainTheEnd(t *testing.T) {
 // A long poll holds the answer up to 30 s: its deadline is longer than a
 // client's shorter timeout.
 func TestAgentEventsOutlastAShortClientTimeout(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(_ int, w http.ResponseWriter, r *http.Request, _ []byte) {
 		if strings.HasSuffix(r.URL.Path, "/events") {
 			time.Sleep(700 * time.Millisecond)
@@ -313,6 +317,7 @@ func TestAgentEventsOutlastAShortClientTimeout(t *testing.T) {
 }
 
 func TestAgentSessionWaitReturnsTheEndedSession(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	gets := 0
 	var polls []string
@@ -375,6 +380,7 @@ func TestAgentSessionWaitTimesOut(t *testing.T) {
 // The API's refusals of agents are the SDK's usual typed errors, and none is
 // retried but by status, as every call is.
 func TestAgentErrorsAreTyped(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		status int
 		code   string
@@ -423,6 +429,7 @@ func TestAgentErrorsAreTyped(t *testing.T) {
 }
 
 func TestAgentDefinitionKeepsFieldsNewerThanTheSDK(t *testing.T) {
+	t.Parallel()
 	var agent Agent
 	encoded, _ := json.Marshal(agentAnswer)
 	if err := json.Unmarshal(encoded, &agent); err != nil {
@@ -458,6 +465,7 @@ func TestAgentDefinitionKeepsFieldsNewerThanTheSDK(t *testing.T) {
 // (packages/cloud-guide/agent-templates.json); skipped when the SDK is on its
 // own.
 func TestAgentTemplatesAreTheGuides(t *testing.T) {
+	t.Parallel()
 	raw, err := os.ReadFile("../../packages/cloud-guide/agent-templates.json")
 	if err != nil {
 		t.Skip("the guide's templates are not beside this module")
@@ -521,6 +529,7 @@ func jsonKeys(t *testing.T, raw []byte, name string) []string {
 }
 
 func TestAgentTemplateDefinitionMergesAUseOverAHarness(t *testing.T) {
+	t.Parallel()
 	templates := &AgentTemplateService{}
 	support, err := templates.Definition("claude-code", "support")
 	if err != nil {
@@ -539,6 +548,12 @@ func TestAgentTemplateDefinitionMergesAUseOverAHarness(t *testing.T) {
 	team, _ := templates.Definition("gemini-cli", "team")
 	if team.Template != "team" || team.VCPU != 4 || team.MemoryMiB != 8192 || team.Secrets[0] != "GEMINI_API_KEY" {
 		t.Fatalf("team %+v", team)
+	}
+	// The reviewer's model keys are its pool of Claude accounts; a use's size wins.
+	review, _ := templates.Definition("review", "team")
+	if encoded, _ := json.Marshal(review); string(encoded) != `{"command":"python3 ~/.runtime-agent/runtime-agent review",`+
+		`"vcpu":4,"memoryMiB":8192,"pool":["ANTHROPIC_API_KEY"],"maxSessionSeconds":1800,"template":"team"}` {
+		t.Fatalf("review %s", encoded)
 	}
 	// A new definition each time: changing one changes no other.
 	support.Secrets[0] = "CHANGED"
@@ -564,6 +579,7 @@ func TestAgentTemplateDefinitionMergesAUseOverAHarness(t *testing.T) {
 }
 
 func TestAgentSessionTreeCostAndStorageReadAsSent(t *testing.T) {
+	t.Parallel()
 	var child AgentSessionInfo
 	body := `{"id":"ses-2","state":"done","trigger":"spawn","reason":"budget","stopWhy":"budget",` +
 		`"parentSessionId":"ses-1","rootSessionId":"ses-1","depth":1,` +
@@ -598,6 +614,7 @@ func TestAgentSessionTreeCostAndStorageReadAsSent(t *testing.T) {
 }
 
 func TestAgentChildrenAndTreeListsReadByParentRootAndDeleted(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(_ int, w http.ResponseWriter, r *http.Request, _ []byte) {
 		row := agentSessionAnswer("done", 4)
 		row["trigger"], row["parentSessionId"], row["depth"] = "spawn", "ses-1", 1
@@ -643,5 +660,92 @@ func TestAgentChildrenAndTreeListsReadByParentRootAndDeleted(t *testing.T) {
 		"/v1/agents/sessions?limit=5&parent=ses-1&state=done"
 	if strings.Join(paths, " ") != want {
 		t.Fatalf("requests %v", paths)
+	}
+}
+
+func TestAgentTriggerRulesCallsAndHeldCalls(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	var mu sync.Mutex
+	type seen struct {
+		method, path, auth, key string
+		body                    map[string]any
+	}
+	var got []seen
+	held := map[string]any{"id": "c1", "triggerId": "trg-1", "agentId": "agt-1", "key": "disk", "text": "disk full",
+		"labels": map[string]string{}, "why": "ended", "state": "held", "sessionId": nil, "notify": "email",
+		"createdAt": "2026-10-18T10:00:00Z", "resolvedAt": nil}
+	s := newServer(t, func(_ int, w http.ResponseWriter, r *http.Request, body []byte) {
+		var received map[string]any
+		if len(body) > 0 {
+			_ = json.Unmarshal(body, &received)
+		}
+		mu.Lock()
+		got = append(got, seen{r.Method, r.URL.RequestURI(), r.Header.Get("Authorization"), r.Header.Get("Idempotency-Key"), received})
+		mu.Unlock()
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/calls"):
+			writeJSON(w, 200, map[string]any{"outcome": "joined", "sessionId": "ses-1", "seq": 2, "callId": nil, "why": nil, "replayed": false})
+		case strings.HasSuffix(r.URL.Path, "/held"):
+			writeJSON(w, 200, map[string]any{"data": []any{held}, "nextCursor": nil})
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			writeJSON(w, 200, map[string]any{"session": agentSessionAnswer("queued", 2), "joined": false, "calls": 2})
+		case strings.HasSuffix(r.URL.Path, "/dismiss"):
+			writeJSON(w, 200, held)
+		default:
+			answer := map[string]any{}
+			for k, v := range triggerAnswer {
+				answer[k] = v
+			}
+			if received != nil && received["rules"] != nil {
+				answer["rules"] = received["rules"]
+			}
+			writeJSON(w, 200, answer)
+		}
+	})
+	c := s.client(t)
+	ten := 10
+	trigger, err := c.Agents.Triggers.CreateWithRules(ctx, "agt-1", "webhook", WebhookTrigger{}, AgentTriggerRules{Key: "{cause}", OnEnded: "ask"})
+	if err != nil || trigger.Rules.Key != "{cause}" || trigger.Rules.OnEnded != "ask" {
+		t.Fatalf("create %+v %v", trigger, err)
+	}
+	if trigger, err = c.Agents.Triggers.SetRules(ctx, "trg-1", AgentTriggerRules{Priority: &ten}); err != nil || *trigger.Rules.Priority != 10 {
+		t.Fatalf("rules %+v %v", trigger, err)
+	}
+	done, err := c.Agents.Triggers.Call(ctx, "trg-1", "rtat_secret_1234567890", AgentTriggerCall{Text: "disk full", Key: "disk", IdempotencyKey: "alert-7"})
+	if err != nil || done.Outcome != "joined" || *done.Seq != 2 {
+		t.Fatalf("call %+v %v", done, err)
+	}
+	page, err := c.Agents.Triggers.Held(ctx, "trg-1", &HeldCallListOptions{State: "held"})
+	if err != nil || len(page.Data) != 1 || page.Data[0].Why != "ended" {
+		t.Fatalf("held %+v %v", page, err)
+	}
+	started, err := c.Agents.Triggers.StartHeld(ctx, "trg-1", "c1")
+	if err != nil || started.Calls != 2 || started.Session.ID != "ses-1" {
+		t.Fatalf("start %+v %v", started, err)
+	}
+	if _, err := c.Agents.Triggers.DismissHeld(ctx, "trg-1", "c1"); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{
+		"POST /v1/agents/agt-1/triggers", "PATCH /v1/agents/triggers/trg-1", "POST /v1/agents/triggers/trg-1/calls",
+		"GET /v1/agents/triggers/trg-1/held?state=held", "POST /v1/agents/triggers/trg-1/held/c1/start",
+		"POST /v1/agents/triggers/trg-1/held/c1/dismiss",
+	}
+	for i, w := range want {
+		if got[i].method+" "+got[i].path != w {
+			t.Fatalf("request %d: %s %s, want %s", i, got[i].method, got[i].path, w)
+		}
+	}
+	if got[0].body["rules"].(map[string]any)["key"] != "{cause}" {
+		t.Fatalf("create body %v", got[0].body)
+	}
+	if got[2].auth != "Bearer rtat_secret_1234567890" || got[2].key != "alert-7" || got[2].body["key"] != "disk" {
+		t.Fatalf("a call carries the secret and its key: %+v", got[2])
+	}
+	if got[1].auth == got[2].auth {
+		t.Fatal("the API key went with the call")
 	}
 }

@@ -8,6 +8,7 @@ import (
 )
 
 func TestASecretIsScopedByOnlyAndScopeAndAnAbsentOnlyIsNotSent(t *testing.T) {
+	t.Parallel()
 	secret := map[string]any{"name": "SLACK_APP_TOKEN", "hosts": []string{"slack.com"}, "placeholder": "rtsec_x", "valueBytes": 6,
 		"only": map[string]any{"labels": []map[string]string{{"role": "hub"}}}, "enforced": true}
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) { writeJSON(w, 200, secret) })
@@ -49,6 +50,7 @@ func TestASecretIsScopedByOnlyAndScopeAndAnAbsentOnlyIsNotSent(t *testing.T) {
 }
 
 func TestASecretEnvIsSentWhenGivenAndReadBack(t *testing.T) {
+	t.Parallel()
 	secret := map[string]any{"name": "GH_REPO_A", "hosts": []string{"api.github.com"}, "placeholder": "rtsec_x", "valueBytes": 5, "env": "GITHUB_TOKEN"}
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) { writeJSON(w, 200, secret) })
 	c := s.client(t)
@@ -70,6 +72,41 @@ func TestASecretEnvIsSentWhenGivenAndReadBack(t *testing.T) {
 	for i, w := range want {
 		if got := strings.TrimSpace(string(s.bodies[i])); got != w {
 			t.Errorf("request %d: got %s, want %s", i, got, w)
+		}
+	}
+}
+
+func TestSecretsListFollowsNextOrKeepsToOnePage(t *testing.T) {
+	t.Parallel()
+	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+		if r.URL.Query().Get("after") == "A" {
+			writeJSON(w, 200, map[string]any{"secrets": []map[string]any{{"name": "B"}}, "next": nil})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"secrets": []map[string]any{{"name": "A"}}, "next": "A"})
+	})
+	c := s.client(t)
+	ctx := context.Background()
+	all, err := c.Secrets.List(ctx)
+	if err != nil || len(all) != 2 || all[0].Name != "A" || all[1].Name != "B" {
+		t.Fatalf("every page: %v %+v", err, all)
+	}
+	one, err := c.Secrets.List(ctx, &SecretListOptions{Limit: 1, After: "A"})
+	if err != nil || len(one) != 1 || one[0].Name != "B" {
+		t.Fatalf("one page: %v %+v", err, one)
+	}
+	// After alone sends no limit: the API's default page, never limit=0.
+	alone, err := c.Secrets.List(ctx, &SecretListOptions{After: "A"})
+	if err != nil || len(alone) != 1 || alone[0].Name != "B" {
+		t.Fatalf("after alone: %v %+v", err, alone)
+	}
+	want := []string{"", "after=A", "after=A&limit=1", "after=A"}
+	if len(s.requests) != len(want) {
+		t.Fatalf("want %d requests, got %d", len(want), len(s.requests))
+	}
+	for i, query := range want {
+		if got := s.requests[i].URL.RawQuery; got != query {
+			t.Errorf("request %d: query %q, want %q", i, got, query)
 		}
 	}
 }

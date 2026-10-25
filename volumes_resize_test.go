@@ -7,6 +7,7 @@ import (
 )
 
 func TestVolumeResizeWaitsKeepsItsKeyAndReadsProgress(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(_ int, w http.ResponseWriter, _ *http.Request, _ []byte) {
 		writeJSON(w, 200, map[string]any{"id": "v", "sizeMiB": 1024, "resize": map[string]any{
 			"id": "r", "operationId": "op", "sizeMiB": 2048, "state": "running", "generation": 1, "error": nil,

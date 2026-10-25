@@ -33,6 +33,9 @@ type CIRepository struct {
 	// App the repository is read through.
 	Installation       int64  `json:"installation"`
 	GithubRepositoryID *int64 `json:"githubRepositoryId"`
+	// UndoCulprits is whether a red production branch's culprit is undone
+	// by a pull request CI/CD opens: off until SetUndo turns it on.
+	UndoCulprits bool `json:"undoCulprits"`
 	// State is connected or disconnected.
 	State string `json:"state"`
 }
@@ -78,7 +81,8 @@ type CICheck struct {
 	// Actor is the GitHub login that pushed, opened or re-ran it.
 	Actor *string `json:"actor"`
 	// Trusted is the repository's writers' code. A fork's pull request is
-	// not, and runs nothing until a writer re-runs it on GitHub.
+	// not, and runs nothing; a writer can open it again from a branch of the
+	// repository.
 	Trusted bool `json:"trusted"`
 	// Waiting: queued for a writer's approval, nothing of it runs.
 	Waiting    bool    `json:"waiting"`
@@ -166,11 +170,13 @@ type CIReview struct {
 	Findings []CIReviewFinding `json:"findings"`
 	// Notes are worth a look and block nothing.
 	Notes []CIReviewNote `json:"notes"`
-	// Agent is the Runtime Agent that reviewed, Account the name of its
-	// secret it ran on.
-	Agent   string `json:"agent"`
-	Account string `json:"account"`
-	Model   string `json:"model"`
+	// Agent is the Runtime Agent that judged (an agent step's; review: is
+	// its short form), Model the model the step asked for ("" when none).
+	Agent string `json:"agent"`
+	Model string `json:"model"`
+	// Account is the Claude account a verdict from before agent steps ran
+	// on; "" for an agent step's.
+	Account string `json:"account,omitempty"`
 	// Session is the agent session that gave the verdict.
 	Session string `json:"session"`
 	// Cut is true when the diff was too long and its end was not read.
@@ -336,6 +342,33 @@ type CIFlakeListOptions struct {
 	Cursor string
 }
 
+// CIReleaseStep is one step a release took, as it took it: a migration's
+// copy test or apply, a deploy ref moved, a server's canary or release, the
+// website's deploy or promote, or a wait and why.
+type CIReleaseStep struct {
+	ID           int64  `json:"id"`
+	RepositoryID string `json:"repositoryId"`
+	// Commit is the commit the release is of.
+	Commit string `json:"commit"`
+	// Source is who took it: mover, or the deploy target that walked it.
+	Source string `json:"source"`
+	// Host is the server it was on, nil when on none.
+	Host *string `json:"host"`
+	Line string  `json:"line"`
+	// At is Unix milliseconds.
+	At int64 `json:"at"`
+}
+
+// CIReleaseListOptions filters CI.Releases.List.
+type CIReleaseListOptions struct {
+	RepositoryID string
+	// Commit keeps one release's steps.
+	Commit string
+	// Limit is 1 to 100, 50 when 0.
+	Limit  int
+	Cursor string
+}
+
 // CIFlakeUpdate is an owner's say on an open flake, every field optional.
 type CIFlakeUpdate struct {
 	// Prove asks for its 100 proof runs at main's next commit.
@@ -381,6 +414,8 @@ type CIService struct {
 	Tests        *CITestService
 	// Flakes are tests that passed and failed on the same inputs.
 	Flakes *CIFlakeService
+	// Releases are the steps each release took.
+	Releases *CIReleaseService
 }
 
 // CIRepositoryService is client.CI.Repositories.
@@ -398,6 +433,9 @@ type CITestService struct{ c *Client }
 // CIFlakeService is client.CI.Flakes.
 type CIFlakeService struct{ c *Client }
 
+// CIReleaseService is client.CI.Releases.
+type CIReleaseService struct{ c *Client }
+
 func newCIService(c *Client) *CIService {
 	return &CIService{
 		Repositories: &CIRepositoryService{c: c},
@@ -405,6 +443,7 @@ func newCIService(c *Client) *CIService {
 		Jobs:         &CIJobService{c: c},
 		Tests:        &CITestService{c: c},
 		Flakes:       &CIFlakeService{c: c},
+		Releases:     &CIReleaseService{c: c},
 	}
 }
 
@@ -447,6 +486,18 @@ func (s *CIRepositoryService) All(ctx context.Context, opts *CIRepositoryListOpt
 	return walk(ctx, func() (*Page[CIRepository], error) { return s.List(ctx, opts) })
 }
 
+// SetUndo turns on (or off) the undo of a red production branch's culprit:
+// when main's check fails, CI/CD finds the first commit that fails it and
+// opens a pull request reverting it, which lands once its own check passes.
+// Off until set; only an owner's or admin's full key sets it.
+func (s *CIRepositoryService) SetUndo(ctx context.Context, id string, on bool) (*CIRepository, error) {
+	var repo CIRepository
+	body := struct {
+		UndoCulprits bool `json:"undoCulprits"`
+	}{on}
+	return &repo, s.c.do(ctx, &call{method: http.MethodPost, path: "/v1/ci/repositories/" + url.PathEscape(id) + ":update", body: body}, &repo)
+}
+
 // Disconnect disconnects a repository; its checks still going are cancelled.
 func (s *CIRepositoryService) Disconnect(ctx context.Context, id string) (*CIRepository, error) {
 	var disconnected CIRepository
@@ -477,6 +528,21 @@ func (s *CICheckService) All(ctx context.Context, opts *CICheckListOptions) iter
 func (s *CICheckService) Get(ctx context.Context, id string) (*CICheckDetail, error) {
 	var check CICheckDetail
 	return &check, s.c.do(ctx, &call{method: http.MethodGet, path: "/v1/ci/checks/" + url.PathEscape(id)}, &check)
+}
+
+// Cancel ends a queued or running check: its jobs end and its machines are
+// let go. A check that has ended is answered as it is.
+func (s *CICheckService) Cancel(ctx context.Context, id string) (*CICheckDetail, error) {
+	var check CICheckDetail
+	return &check, s.c.do(ctx, &call{method: http.MethodPost, path: "/v1/ci/checks/" + url.PathEscape(id) + ":cancel"}, &check)
+}
+
+// Rerun runs a check again, as GitHub's Re-run does: a new check of the same
+// commit (a pull request's as it would land now), trusted only as the
+// commit's last check was. A check still going is answered as it is.
+func (s *CICheckService) Rerun(ctx context.Context, id string) (*CICheckDetail, error) {
+	var check CICheckDetail
+	return &check, s.c.do(ctx, &call{method: http.MethodPost, path: "/v1/ci/checks/" + url.PathEscape(id) + ":rerun"}, &check)
 }
 
 // Get reads a job with the tail of its output (the last 256 KiB).
@@ -535,4 +601,20 @@ func (s *CIFlakeService) Get(ctx context.Context, id string) (*CIFlakeDetail, er
 func (s *CIFlakeService) Update(ctx context.Context, id string, change CIFlakeUpdate) (*CIFlakeDetail, error) {
 	var flake CIFlakeDetail
 	return &flake, s.c.do(ctx, &call{method: http.MethodPost, path: "/v1/ci/flakes/" + url.PathEscape(id) + ":update", body: change, key: change.IdempotencyKey}, &flake)
+}
+
+// List returns the first page of release steps, newest first, or the one
+// after opts.Cursor. opts may be nil.
+func (s *CIReleaseService) List(ctx context.Context, opts *CIReleaseListOptions) (*Page[CIReleaseStep], error) {
+	query, cursor := url.Values{}, ""
+	if opts != nil {
+		setQuery(query, "repositoryId", opts.RepositoryID, "commit", opts.Commit, "limit", itoa(opts.Limit))
+		cursor = opts.Cursor
+	}
+	return listPage[CIReleaseStep](ctx, s.c, "/v1/ci/releases", query, cursor)
+}
+
+// All walks every step a list with these options finds.
+func (s *CIReleaseService) All(ctx context.Context, opts *CIReleaseListOptions) iter.Seq2[CIReleaseStep, error] {
+	return walk(ctx, func() (*Page[CIReleaseStep], error) { return s.List(ctx, opts) })
 }

@@ -46,6 +46,9 @@ type call struct {
 	roomed bool
 	// timeout replaces the client's for this call.
 	timeout time.Duration
+	// bearer is sent instead of the client's API key: a webhook trigger's
+	// secret, which is all its calls carry.
+	bearer string
 }
 
 // newKey makes an idempotency key: a random UUID.
@@ -93,6 +96,14 @@ func backoff(attempt int) time.Duration {
 func roomBackoff(attempt int) time.Duration {
 	base := min(8000, 500*(1<<min(attempt, 10)))
 	return time.Duration(float64(base)*(0.75+mathrand.Float64()*0.5)) * time.Millisecond
+}
+
+// wait waits out one of a call's retry pauses on the client's clock.
+func (c *Client) wait(ctx context.Context, d time.Duration) error {
+	if c.pause != nil {
+		return c.pause(ctx, d)
+	}
+	return sleep(ctx, d)
 }
 
 func sleep(ctx context.Context, d time.Duration) error {
@@ -166,7 +177,11 @@ func (c *Client) send(ctx context.Context, cl *call, whole bool) (*http.Response
 		if payload == nil {
 			request.Body = http.NoBody
 		}
-		request.Header.Set("Authorization", "Bearer "+c.apiKey)
+		bearer := c.apiKey
+		if cl.bearer != "" {
+			bearer = cl.bearer
+		}
+		request.Header.Set("Authorization", "Bearer "+bearer)
 		accept := cl.accept
 		if accept == "" {
 			accept = "application/json"
@@ -219,7 +234,7 @@ func (c *Client) send(ctx context.Context, cl *call, whole bool) (*http.Response
 			if atOnce {
 				pause = time.Duration(mathrand.Float64() * float64(50*time.Millisecond))
 			}
-			if ctx.Err() != nil || cl.noRetry || attempt >= c.maxRetries || sleep(ctx, pause) != nil {
+			if ctx.Err() != nil || cl.noRetry || attempt >= c.maxRetries || c.wait(ctx, pause) != nil {
 				failure := c.connectionError(ctx, write, key, err)
 				cancel()
 				return nil, nil, failure
@@ -253,7 +268,7 @@ func (c *Client) send(ctx context.Context, cl *call, whole bool) (*http.Response
 				wait = roomBackoff(roomAttempt)
 			}
 			roomAttempt++
-			if sleep(ctx, min(left, wait)) != nil {
+			if c.wait(ctx, min(left, wait)) != nil {
 				cancel()
 				return nil, nil, failure
 			}
@@ -284,7 +299,7 @@ func (c *Client) send(ctx context.Context, cl *call, whole bool) (*http.Response
 			}
 			pause := time.Duration(float64(min(30*time.Second, base*time.Duration(1<<min(idleAttempt, 3)))) * (0.9 + mathrand.Float64()*0.2))
 			idleAttempt++
-			if pause >= time.Until(idleUntil) || sleep(ctx, pause) != nil {
+			if pause >= time.Until(idleUntil) || c.wait(ctx, pause) != nil {
 				cancel()
 				return nil, nil, failure
 			}
@@ -300,7 +315,7 @@ func (c *Client) send(ctx context.Context, cl *call, whole bool) (*http.Response
 			wait = backoff(attempt)
 		}
 		wait = time.Duration(float64(min(30*time.Second, wait)) * (0.9 + mathrand.Float64()*0.2))
-		if sleep(ctx, wait) != nil {
+		if c.wait(ctx, wait) != nil {
 			cancel()
 			return nil, nil, failure
 		}
@@ -503,7 +518,7 @@ func (c *Client) fileBytes(ctx context.Context, cl *call) ([]byte, error) {
 		if attempt >= 2 {
 			return nil, problem
 		}
-		if sleep(ctx, backoff(attempt)) != nil {
+		if c.wait(ctx, backoff(attempt)) != nil {
 			return nil, problem
 		}
 	}

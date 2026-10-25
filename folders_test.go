@@ -69,6 +69,7 @@ func leftovers(t *testing.T, dir string) []string {
 }
 
 func TestAFolderDownloadsThroughTheFolderRoute(t *testing.T) {
+	t.Parallel()
 	// bsdtar pads its compressed output to a whole record with zeros.
 	padded := append(folderArchive(t, true), make([]byte, 700)...)
 	if err := unpackArchive(padded, filepath.Join(t.TempDir(), "padded")); err != nil {
@@ -95,6 +96,7 @@ func TestAFolderDownloadsThroughTheFolderRoute(t *testing.T) {
 }
 
 func TestAFolderCutShortIsDownloadIncompleteAndWritesNothing(t *testing.T) {
+	t.Parallel()
 	whole := folderArchive(t, true)
 	for name, body := range map[string][]byte{
 		// gzip stopped part way: its checksum never arrives.
@@ -120,6 +122,7 @@ func TestAFolderCutShortIsDownloadIncompleteAndWritesNothing(t *testing.T) {
 }
 
 func TestAFolderMergesIntoOneThereButNeverThroughALink(t *testing.T) {
+	t.Parallel()
 	s := folderServer(t, folderArchive(t, true))
 	sbx := newSandbox(s.client(t), SandboxInfo{ID: "sbx-1"})
 	out := filepath.Join(t.TempDir(), "copy")
@@ -150,6 +153,7 @@ func TestAFolderMergesIntoOneThereButNeverThroughALink(t *testing.T) {
 }
 
 func TestALargeFolderUploadsInPartsInOrder(t *testing.T) {
+	t.Parallel()
 	var parts []string
 	var begin, small bool
 	var joined bytes.Buffer
@@ -203,6 +207,7 @@ func TestALargeFolderUploadsInPartsInOrder(t *testing.T) {
 }
 
 func TestAFailedFolderUploadIsAborted(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		switch r.URL.Path {
 		case "/v1/sandboxes/sbx-1/files/archive/uploads":
@@ -262,6 +267,7 @@ func gzipTar(t *testing.T, entries ...tarEntry) []byte {
 // tar writes a file's first name as a file and every other as a hard link to
 // it: a folder holding one file twice (1 October 2026 audit).
 func TestHardLinkedFilesLandWithTheirContent(t *testing.T) {
+	t.Parallel()
 	out := filepath.Join(t.TempDir(), "out")
 	err := unpackArchive(gzipTar(t,
 		tarEntry{tar.Header{Name: "./a.txt", Mode: 0o644, Typeflag: tar.TypeReg}, "first"},

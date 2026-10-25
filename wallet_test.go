@@ -20,6 +20,7 @@ type walletSeen struct {
 }
 
 func TestWalletOpenAndClaim(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var seen []walletSeen
 	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -66,6 +67,7 @@ func TestWalletOpenAndClaim(t *testing.T) {
 }
 
 func TestWalletClaimNotPaid(t *testing.T) {
+	t.Parallel()
 	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(202)
 		_, _ = w.Write([]byte(`{"status":"open","orgId":"o1","next":"Pay, then call again.",` +
@@ -84,6 +86,7 @@ func TestWalletClaimNotPaid(t *testing.T) {
 }
 
 func TestWalletNoAnswer(t *testing.T) {
+	t.Parallel()
 	site := httptest.NewServer(http.NotFoundHandler())
 	url := site.URL
 	site.Close()

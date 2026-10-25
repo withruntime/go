@@ -26,6 +26,7 @@ func sign(secret string, stamp int64, body string) string {
 }
 
 func TestVerifyWebhookAcceptsARotationAndRefusesForgeriesAndReplays(t *testing.T) {
+	t.Parallel()
 	body := `{"id":"evt_1","type":"sandbox.stopped","createdAt":"2026-09-23T10:00:00Z","data":{"sandbox":{"id":"s"}}}`
 	now := time.Unix(1_790_000_000, 0)
 	header := fmt.Sprintf("t=%d,v1=%s,v1=%s", now.Unix(), sign("old", now.Unix(), body), sign("new", now.Unix(), body))
@@ -50,6 +51,7 @@ func TestVerifyWebhookAcceptsARotationAndRefusesForgeriesAndReplays(t *testing.T
 }
 
 func TestDockerignoreFollowsDockersRules(t *testing.T) {
+	t.Parallel()
 	ignored, err := dockerignoreFilter("# comment\nnode_modules\n**/*.log\n!keep.log\nbuild/\n/secret?.txt\n")
 	if err != nil {
 		t.Fatal(err)
@@ -72,6 +74,7 @@ func TestDockerignoreFollowsDockersRules(t *testing.T) {
 }
 
 func TestAContextUploadsOnlyTheChunksTheServerLacks(t *testing.T) {
+	t.Parallel()
 	folder := t.TempDir()
 	must := func(err error) {
 		if err != nil {
@@ -127,6 +130,7 @@ func TestAContextUploadsOnlyTheChunksTheServerLacks(t *testing.T) {
 }
 
 func TestABuildStreamsItsLogAndAFailureIsAnError(t *testing.T) {
+	t.Parallel()
 	image := map[string]any{"id": "22222222-3333-4444-8555-666666666666", "state": "queued", "createdAt": "2026-09-23T10:00:00Z"}
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		switch {
@@ -241,6 +245,7 @@ func TestGetOrCreateUpdateAndKeepAliveSendWhatTheAPIReads(t *testing.T) {
 }
 
 func TestAnInterpreterCellStreamsItsParts(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		for _, line := range []string{
@@ -274,6 +279,7 @@ func TestAnInterpreterCellStreamsItsParts(t *testing.T) {
 }
 
 func TestRequestReachesANewerEndpointWithTheSameRules(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		if n == 1 {
 			apiError(w, 503, "host_unavailable", map[string]any{"retryAfterMs": 1})
@@ -293,6 +299,7 @@ func TestRequestReachesANewerEndpointWithTheSameRules(t *testing.T) {
 // Straight after a fork the sandbox is still resuming; a snapshot then waits
 // for it to run, then sends only the snapshot call: the server pauses and wakes it.
 func TestASnapshotWaitsForAResumingSandboxToSettle(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		info := map[string]any{}
 		for k, v := range running {
@@ -414,6 +421,7 @@ func TestKeepAliveLeavesASandboxWithNoTimeLimitAlone(t *testing.T) {
 // CLOUD.md section 4: the old field names are the renamed services, until a
 // release after their week of overlap removes them.
 func TestRenamedProductFieldsAreTheSameServices(t *testing.T) {
+	t.Parallel()
 	c, err := New(WithAPIKey("rk_renamed"))
 	if err != nil {
 		t.Fatal(err)
@@ -424,6 +432,7 @@ func TestRenamedProductFieldsAreTheSameServices(t *testing.T) {
 }
 
 func TestReferralsReadEveryFieldAndNoName(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(_ int, w http.ResponseWriter, r *http.Request, body []byte) {
 		writeJSON(w, 200, map[string]any{
 			"code": "k7m2q9xd", "link": "https://withruntime.com/r/k7m2q9xd", "signedUp": 2, "paid": 1,
@@ -453,6 +462,7 @@ func TestReferralsReadEveryFieldAndNoName(t *testing.T) {
 }
 
 func TestPlansListAndEveryChange(t *testing.T) {
+	t.Parallel()
 	var seen []string
 	var bodies []string
 	var keys []string
@@ -551,6 +561,7 @@ func TestPlansListAndEveryChange(t *testing.T) {
 }
 
 func TestCreateSendsSpreadFromAndReadsPlacement(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		info := map[string]any{}
 		for k, v := range running {
@@ -575,6 +586,7 @@ func TestCreateSendsSpreadFromAndReadsPlacement(t *testing.T) {
 }
 
 func TestCreateAndForkSendSecretsOnlyWhenGivenAndReadThem(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
 		var sent map[string]any
 		_ = json.Unmarshal(body, &sent)

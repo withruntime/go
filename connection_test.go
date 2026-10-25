@@ -100,6 +100,7 @@ func TestASavedConnectionOthersCanReadIsRefused(t *testing.T) {
 }
 
 func TestOrigins(t *testing.T) {
+	t.Parallel()
 	for value, want := range map[string]string{
 		"https://api.withruntime.com":  "https://api.withruntime.com",
 		"https://api.withruntime.com/": "https://api.withruntime.com",
@@ -121,6 +122,7 @@ func TestOrigins(t *testing.T) {
 // which the sandbox's host forwards to the public API (ARCHITECTURE.md section
 // 10, "Runtime's API from inside a sandbox").
 func TestRuntimeInternalIsAcceptedAndOtherPlainHTTPIsNot(t *testing.T) {
+	t.Parallel()
 	for _, value := range []string{"http://runtime.internal", "http://runtime.internal/", "http://runtime.internal:80"} {
 		got, err := origin(value)
 		if err != nil || got != SandboxBaseURL {
