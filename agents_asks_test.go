@@ -73,3 +73,51 @@ func TestAgentAsksListByStateAndLabelsGetAndAnswer(t *testing.T) {
 		t.Fatalf("answer body %v", bodies[2])
 	}
 }
+
+func TestAgentAsksApproveAndDenyAHeldToolCall(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	var mu sync.Mutex
+	var bodies []map[string]any
+	s := newServer(t, func(_ int, w http.ResponseWriter, r *http.Request, body []byte) {
+		var received map[string]any
+		_ = json.Unmarshal(body, &received)
+		mu.Lock()
+		bodies = append(bodies, received)
+		mu.Unlock()
+		held := map[string]any{}
+		for k, v := range inboxAsk {
+			held[k] = v
+		}
+		held["state"], held["answer"] = "answered", received
+		held["toolCall"] = map[string]any{"tool": "Bash", "input": map[string]any{"command": "rm -rf build"}, "seq": 4, "policy": "always_ask"}
+		writeJSON(w, 200, held)
+	})
+	c := s.client(t)
+	allowed, err := c.Agents.Asks.Approve(ctx, "ask-1")
+	if err != nil || allowed.ToolCall == nil || allowed.ToolCall.Tool != "Bash" || allowed.ToolCall.Seq != 4 || allowed.ToolCall.Input["command"] != "rm -rf build" {
+		t.Fatalf("approve %+v %v", allowed, err)
+	}
+	if _, err := c.Agents.Asks.Deny(ctx, "ask-1", "Clean dist/ only."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Agents.Asks.Deny(ctx, "ask-1", ""); err != nil {
+		t.Fatal(err)
+	}
+	want := []map[string]any{{"option": "Allow"}, {"option": "Deny", "text": "Clean dist/ only."}, {"option": "Deny"}}
+	if !reflect.DeepEqual(bodies, want) {
+		t.Fatalf("bodies %v", bodies)
+	}
+}
+
+func TestAgentDefinitionPermissionsRoundTrip(t *testing.T) {
+	d := AgentDefinition{Command: "claude", Permissions: &AgentPermissions{Default: "auto", Tools: map[string]string{"shell": "always_ask"}}}
+	body, err := json.Marshal(d)
+	if err != nil || string(body) != `{"command":"claude","permissions":{"default":"auto","tools":{"shell":"always_ask"}}}` {
+		t.Fatalf("%s %v", body, err)
+	}
+	var back AgentDefinition
+	if err := json.Unmarshal(body, &back); err != nil || back.Permissions.Tools["shell"] != "always_ask" || back.Extra != nil {
+		t.Fatalf("%+v %v", back, err)
+	}
+}

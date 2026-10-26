@@ -749,3 +749,66 @@ func TestAgentTriggerRulesCallsAndHeldCalls(t *testing.T) {
 		t.Fatal("the API key went with the call")
 	}
 }
+
+func TestAgentsAnthropicIsTheOptionsAnthropicsSDKTakes(t *testing.T) {
+	client, err := New(WithAPIKey("rk_test"), WithBaseURL("https://api.example.test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := client.Agents.Anthropic()
+	if got != (AnthropicOptions{BaseURL: "https://api.example.test/anthropic", APIKey: "rk_test"}) {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestAgentTraceReadsTurnsToolCallsAndOTLP(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	var mu sync.Mutex
+	var queries []string
+	s := newServer(t, func(_ int, w http.ResponseWriter, r *http.Request, _ []byte) {
+		mu.Lock()
+		queries = append(queries, r.URL.RequestURI())
+		mu.Unlock()
+		if r.URL.Query().Get("format") == "otlp" {
+			writeJSON(w, 200, map[string]any{"resourceSpans": []any{map[string]any{"scopeSpans": []any{}}}, "nextAfter": 3})
+			return
+		}
+		_, _ = w.Write([]byte(`{"sessionId":"ses-1","totals":{"turns":1,"toolCalls":1,"inputTokens":1000,"outputTokens":2000,` +
+			`"cacheReadTokens":100000,"cacheWriteTokens":4000,"costUsd":0.084,"unpricedTurns":0,"failedTurns":0,"failedToolCalls":1,` +
+			`"modelMs":4200,"toolMs":1500},"models":[{"model":"claude-opus-5-5","provider":"anthropic","turns":1,"unpricedTurns":0,` +
+			`"inputTokens":1000,"outputTokens":2000,"cacheReadTokens":100000,"cacheWriteTokens":4000,"costUsd":0.084}],` +
+			`"tools":[{"name":"Bash","calls":1,"failed":1,"durationMs":1500}],"spans":[` +
+			`{"seq":2,"kind":"turn","id":"0123456789abcdef","provider":"anthropic","model":"claude-opus-5-5","startedAt":"2026-10-26T01:00:00.000Z",` +
+			`"durationMs":4200,"firstTokenMs":800,"inputTokens":1000,"outputTokens":2000,"cacheReadTokens":100000,"cacheWriteTokens":4000,` +
+			`"costUsd":0.084,"stopReason":"tool_use","status":200,"error":null,"toolCalls":[{"id":"toolu_01","name":"Bash"}]},` +
+			`{"seq":3,"kind":"tool","id":"toolu_01","name":"Bash","turn":"0123456789abcdef","startedAt":"2026-10-26T01:00:04.200Z",` +
+			`"durationMs":1500,"input":"{}","output":"1 fail","error":true}],"nextAfter":null}`))
+	})
+	session := &AgentSession{c: s.client(t), info: AgentSessionInfo{ID: "ses-1"}}
+	trace, err := session.Trace(ctx, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trace.Totals.Turns != 1 || trace.Totals.CostUSD != 0.084 || trace.Totals.CacheReadTokens != 100000 ||
+		trace.Models[0].Model != "claude-opus-5-5" || trace.Tools[0].Failed != 1 || trace.NextAfter != nil {
+		t.Fatalf("trace %+v", trace)
+	}
+	turn, tool := trace.Spans[0], trace.Spans[1]
+	if turn.Kind != "turn" || *turn.CostUSD != 0.084 || *turn.FirstTokenMS != 800 || turn.ToolCalls[0].Name != "Bash" ||
+		!turn.StartedAt.Equal(time.Date(2026, 10, 26, 1, 0, 0, 0, time.UTC)) {
+		t.Fatalf("turn %+v", turn)
+	}
+	if tool.Kind != "tool" || tool.Name != "Bash" || *tool.Turn != turn.ID || string(tool.Error) != "true" || tool.DurationMS != 1500 {
+		t.Fatalf("tool %+v", tool)
+	}
+	otlp, err := session.TraceOTLP(ctx, 2, 500)
+	// The request a collector takes holds the spans and nothing of the page.
+	if err != nil || string(otlp.Request) != `{"resourceSpans":[{"scopeSpans":[]}]}` || *otlp.NextAfter != 3 {
+		t.Fatalf("otlp %+v %v", otlp, err)
+	}
+	if queries[0] != "/v1/agents/sessions/ses-1/trace?after=0&format=json" ||
+		queries[1] != "/v1/agents/sessions/ses-1/trace?after=2&format=otlp&limit=500" {
+		t.Fatalf("queries %v", queries)
+	}
+}

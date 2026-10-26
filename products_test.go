@@ -249,6 +249,10 @@ func TestFixtureEveryProductMethodReachesARegisteredRoute(t *testing.T) {
 		"GET /v1/sandboxes/{id}/previews":                func() error { _, err := sbx.Previews.List(ctx); return err },
 		"POST /v1/sandboxes/{id}/previews/{port}:rotate": func() error { _, err := sbx.Previews.Rotate(ctx, 3000); return err },
 		"DELETE /v1/sandboxes/{id}/previews/{port}":      func() error { return sbx.Previews.Delete(ctx, 3000) },
+		"POST /v1/job-imports": func() error {
+			_, err := c.Jobs.ImportPlan(ctx, JobImportRequest{Files: []JobImportFile{{Path: "job.yaml", Text: "kind: Job\n"}}, From: "cloud-run"})
+			return err
+		},
 		"POST /v1/apps": func() error {
 			_, err := c.Apps.Create(ctx, CreateAppOptions{Name: "go-fixture", MaxCopies: 1, VCPU: 1, MemoryMiB: 512})
 			return err

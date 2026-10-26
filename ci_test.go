@@ -25,6 +25,8 @@ var ciCheckAnswer = map[string]any{"id": ciID, "repositoryId": ciID, "repository
 var ciJobAnswer = map[string]any{"id": ciID, "checkId": ciID, "repositoryId": ciID, "name": "test", "part": 1, "parts": 2,
 	"needs": []string{"build"}, "command": "bun test", "cacheKey": nil, "state": "failed", "cachedFrom": nil, "exitCode": 1,
 	"reason": nil, "sandboxIds": []string{"sbx-1"}, "githubCheckRun": 99, "ms": 1200, "createdAt": 1, "updatedAt": 2,
+	"annotations": []map[string]any{{"path": "src/a.go", "startLine": 12, "endLine": 12, "startColumn": 3, "level": "failure",
+		"message": "undefined: x", "title": "compile"}},
 	"startedAt": 1, "endedAt": 2, "review": ciReviewAnswer}
 
 var ciReviewAnswer = map[string]any{
@@ -148,6 +150,8 @@ func TestCIRoutesSendWhatTheAPIReads(t *testing.T) {
 			check, err := c.CI.Checks.Get(ctx, ciID)
 			if err == nil && (check.ID != ciID || len(check.Jobs) != 1 || check.Jobs[0].Name != "test" || check.Jobs[0].SandboxIDs[0] != "sbx-1" ||
 				*check.Jobs[0].ExitCode != 1 || *check.Jobs[0].GithubCheckRun != 99 ||
+				check.Jobs[0].Annotations[0].Path != "src/a.go" || *check.Jobs[0].Annotations[0].StartColumn != 3 ||
+				check.Jobs[0].Annotations[0].Level != "failure" ||
 				check.Jobs[0].Review.Findings[0].Line != 4 || check.Jobs[0].Review.Account != "CLAUDE_TOKEN_1") {
 				t.Fatalf("check %+v", check)
 			}
