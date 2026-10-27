@@ -96,6 +96,14 @@ func TestAgentRoutesSendWhatTheAPIReads(t *testing.T) {
 			_, err := c.Agents.Start(ctx, "helpdesk", "hello", &StartAgentOptions{IdempotencyKey: "start-1"})
 			return err
 		}, map[string]any{"input": "hello"}, "start-1"},
+		{"start with overrides", "POST", "/v1/agents/helpdesk/sessions", func() error {
+			_, err := c.Agents.Start(ctx, "helpdesk", "hello", &StartAgentOptions{Overrides: &AgentSessionOverrides{
+				Model: "claude-haiku-5-5", MCP: []string{}, DisallowedTools: []string{"Bash"}, MaxSessionDollars: 0.5,
+			}})
+			return err
+		}, map[string]any{"input": "hello", "overrides": map[string]any{
+			"model": "claude-haiku-5-5", "mcp": []any{}, "disallowedTools": []any{"Bash"}, "maxSessionDollars": 0.5,
+		}}, "auto"},
 		{"session get", "GET", "/v1/agents/sessions/ses-1", func() error {
 			found, err := c.Agents.Sessions.Get(ctx, "ses-1")
 			if err == nil && (found.Seq() != 3 || found.Joined() || !found.Info().Ended() || *found.Info().Key != "customer:42") {
@@ -660,6 +668,43 @@ func TestAgentChildrenAndTreeListsReadByParentRootAndDeleted(t *testing.T) {
 		"/v1/agents/sessions?limit=5&parent=ses-1&state=done"
 	if strings.Join(paths, " ") != want {
 		t.Fatalf("requests %v", paths)
+	}
+}
+
+func TestAgentSlackInstallTeamsAndRemove(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	var mu sync.Mutex
+	var got []string
+	s := newServer(t, func(_ int, w http.ResponseWriter, r *http.Request, _ []byte) {
+		mu.Lock()
+		got = append(got, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		switch r.Method {
+		case http.MethodPost:
+			writeJSON(w, 201, map[string]any{"url": "https://withruntime.com/api/account/agents/slack/start?install=s", "expiresAt": "2026-10-26T17:15:00.000Z"})
+		case http.MethodGet:
+			writeJSON(w, 200, map[string]any{"data": []any{map[string]any{"team": "T0ACME", "name": "Acme", "botUser": "U0BOT", "installedAt": "2026-10-26T17:00:00.000Z"}}})
+		default:
+			writeJSON(w, 200, map[string]any{"team": "T0ACME", "removed": true})
+		}
+	})
+	c := s.client(t)
+	link, err := c.Agents.Slack.Install(ctx)
+	if err != nil || !strings.Contains(link.URL, "/api/account/agents/slack/start") {
+		t.Fatalf("install %+v %v", link, err)
+	}
+	teams, err := c.Agents.Slack.Teams(ctx)
+	if err != nil || len(teams) != 1 || teams[0].Team != "T0ACME" || *teams[0].Name != "Acme" {
+		t.Fatalf("teams %+v %v", teams, err)
+	}
+	if err := c.Agents.Slack.Remove(ctx, "T0ACME"); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Join(got, ", ") != "POST /v1/agents/slack/installs, GET /v1/agents/slack/teams, DELETE /v1/agents/slack/teams/T0ACME" {
+		t.Fatalf("requests %v", got)
 	}
 }
 

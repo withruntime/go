@@ -110,3 +110,71 @@ func TestSecretsListFollowsNextOrKeepsToOnePage(t *testing.T) {
 		}
 	}
 }
+
+func TestAnExposedSecretSendsNoHostsAndExpectedVersionIsSent(t *testing.T) {
+	t.Parallel()
+	secret := map[string]any{"name": "DEPLOY_KEY", "hosts": []string{}, "exposed": true, "version": 1, "placeholder": "rtsec_x", "valueBytes": 52}
+	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) { writeJSON(w, 200, secret) })
+	c := s.client(t)
+	ctx := context.Background()
+	pem := "-----BEGIN FAKE KEY-----\nAAAA\n-----END FAKE KEY-----\n"
+	// A real value goes only to the sandboxes and Apps named by id.
+	worker, app := "5d2c8a1e-7b3f-4c6d-9e0a-1f2b3c4d5e6f", "0b6f3c1e-2d4a-4e5f-9a7b-8c9d0e1f2a3b"
+	saved, err := c.Secrets.Set(ctx, "DEPLOY_KEY", SetSecretOptions{Value: pem, Exposed: true, Env: "SSH_KEY", Only: &SecretScope{Sandboxes: []string{worker}}})
+	if err != nil || !saved.Exposed || saved.Version != 1 || len(saved.Hosts) != 0 {
+		t.Fatalf("the kind and version were not read back: %v %+v", err, saved)
+	}
+	zero, three := 0, 3
+	if _, err := c.Secrets.Set(ctx, "DB_PASSWORD", SetSecretOptions{Value: "fake-db-password", Exposed: true, Only: &SecretScope{Apps: []string{app}}, ExpectedVersion: &zero}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Secrets.Set(ctx, "OPENAI_API_KEY", SetSecretOptions{Value: "fake-api-key", Hosts: []string{"api.openai.com"}, ExpectedVersion: &three}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		`{"value":"-----BEGIN FAKE KEY-----\nAAAA\n-----END FAKE KEY-----\n","only":{"sandboxes":["5d2c8a1e-7b3f-4c6d-9e0a-1f2b3c4d5e6f"]},"env":"SSH_KEY","exposed":true}`,
+		`{"value":"fake-db-password","only":{"apps":["0b6f3c1e-2d4a-4e5f-9a7b-8c9d0e1f2a3b"]},"exposed":true,"expectedVersion":0}`,
+		`{"value":"fake-api-key","hosts":["api.openai.com"],"expectedVersion":3}`,
+	}
+	if len(s.bodies) != len(want) {
+		t.Fatalf("want %d requests, got %d", len(want), len(s.bodies))
+	}
+	for i, w := range want {
+		if got := strings.TrimSpace(string(s.bodies[i])); got != w {
+			t.Errorf("request %d: got %s, want %s", i, got, w)
+		}
+	}
+}
+
+func TestSecretsGetReadsOneByName(t *testing.T) {
+	t.Parallel()
+	s := newServer(t, func(n int, w http.ResponseWriter, r *http.Request, body []byte) {
+		if r.URL.EscapedPath() == "/v1/egress-secrets/MISSING" {
+			writeJSON(w, 404, map[string]any{"error": map[string]any{"code": "not_found", "message": "No secret named MISSING."}})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"name": "DB_PASSWORD", "hosts": []string{}, "exposed": true, "version": 2, "placeholder": "rtsec_x", "valueBytes": 16})
+	})
+	c := s.client(t)
+	ctx := context.Background()
+	found, err := c.Secrets.Get(ctx, "DB_PASSWORD")
+	if err != nil || found.Name != "DB_PASSWORD" || !found.Exposed || found.Version != 2 {
+		t.Fatalf("get: %v %+v", err, found)
+	}
+	if _, err := c.Secrets.Get(ctx, "A B"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Secrets.Get(ctx, "MISSING")
+	if failure, ok := asError(err); !ok || failure.Status != 404 || failure.Code != "not_found" {
+		t.Fatalf("want a 404 not_found, got %v", err)
+	}
+	want := []string{"GET /v1/egress-secrets/DB_PASSWORD", "GET /v1/egress-secrets/A%20B", "GET /v1/egress-secrets/MISSING"}
+	if len(s.requests) != len(want) {
+		t.Fatalf("want %d requests, got %d", len(want), len(s.requests))
+	}
+	for i, w := range want {
+		if line := s.requests[i].Method + " " + s.requests[i].URL.EscapedPath(); line != w {
+			t.Errorf("request %d: got %s, want %s", i, line, w)
+		}
+	}
+}

@@ -126,6 +126,7 @@ func TestFixtureEveryProductMethodReachesARegisteredRoute(t *testing.T) {
 			return err
 		},
 		"GET /v1/egress-secrets":           func() error { _, err := c.Secrets.List(ctx); return err },
+		"GET /v1/egress-secrets/{name}":    func() error { _, err := c.Secrets.Get(ctx, "OPENAI_API_KEY"); return err },
 		"DELETE /v1/egress-secrets/{name}": func() error { return c.Secrets.Delete(ctx, "OPENAI_API_KEY") },
 		"POST /v1/reservations": func() error {
 			start := time.Now().Add(time.Hour)

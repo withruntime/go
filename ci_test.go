@@ -142,8 +142,8 @@ func TestCIRoutesSendWhatTheAPIReads(t *testing.T) {
 			}
 			return err
 		}, nil, "none"},
-		{"checks list filtered", "GET", "/v1/ci/checks?branch=main&commit=" + strings.Repeat("a", 40) + "&cursor=c1&limit=10&pullRequest=3&repositoryId=" + ciID + "&state=failed&state=running", func() error {
-			_, err := c.CI.Checks.List(ctx, &CICheckListOptions{RepositoryID: ciID, State: []string{"failed", "running"}, Branch: "main", Commit: strings.Repeat("a", 40), PullRequest: 3, Limit: 10, Cursor: "c1"})
+		{"checks list filtered", "GET", "/v1/ci/checks?branch=main&commit=" + strings.Repeat("a", 40) + "&cursor=c1&event=merge_group&limit=10&pullRequest=3&repositoryId=" + ciID + "&state=failed&state=running", func() error {
+			_, err := c.CI.Checks.List(ctx, &CICheckListOptions{RepositoryID: ciID, State: []string{"failed", "running"}, Event: []string{"merge_group"}, Branch: "main", Commit: strings.Repeat("a", 40), PullRequest: 3, Limit: 10, Cursor: "c1"})
 			return err
 		}, nil, "none"},
 		{"check get", "GET", "/v1/ci/checks/" + ciID, func() error {
